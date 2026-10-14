@@ -1,13 +1,15 @@
 {
-  "name": "figma-bridge",
+  "name": "figma-agent-bridge",
   "private": true,
   "type": "module",
-  "description": "Local Figma → agent bridge: plugin-based design-tree extraction with push and pull modes, disk persistence, optional MCP.",
+  "description": "Figma Agent — local, rate-limit-free Figma → agent pipeline with REST API parity (drop-in local replacement for api.figma.com).",
   "scripts": {
     "start": "tsx bridge-server.ts",
     "start:dev": "BRIDGE_PORT=3002 tsx bridge-server.ts",
-    "check": "tsc -p tsconfig.json",
-    "publish": "cp plugin/code.ts plugin/ui.html \"../Agent Plugin/\" && cd \"../Agent Plugin\" && npm run build && echo 'synced to the live Agent Plugin folder — reopen the plugin in Figma to load it'"
+    "check": "tsc -p tsconfig.json && tsc -p plugin/tsconfig.json",
+    "test": "vitest run",
+    "golden-diff": "tsx tools/golden-diff.ts",
+    "publish": "cp plugin/code.ts plugin/ui.html plugin/manifest.json \"../Figma Agent/\" && cp -R plugin/lib \"../Figma Agent/\" && cd \"../Figma Agent\" && npm run build && echo 'synced to the Figma Agent dev plugin — reopen the plugin in Figma to load it'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -16,10 +18,12 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@figma/plugin-typings": "*",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
     "tsx": "^4.15.0",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.0"
   }
 }

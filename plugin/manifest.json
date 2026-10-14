@@ -1,0 +1,20 @@
+{
+  "name": "Figma Agent",
+  "id": "1692298303631543959",
+  "api": "1.0.0",
+  "main": "code.js",
+  "capabilities": [],
+  "enableProposedApi": false,
+  "documentAccess": "dynamic-page",
+  "editorType": [
+    "figma"
+  ],
+  "ui": "ui.html",
+  "networkAccess": {
+    "allowedDomains": [
+      "http://127.0.0.1:3002",
+      "http://localhost:3002"
+    ],
+    "reasoning": "The plugin talks to a local bridge server (figma-agent) running on this machine to deliver design data to local AI agents."
+  }
+}

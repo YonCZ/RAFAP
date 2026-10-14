@@ -13,14 +13,14 @@
   </style>
 </head>
 <body>
-  <h3>Figma ↔ Agent Bridge</h3>
+  <h3>Figma Agent</h3>
   <div id="conn">connecting…</div>
   <button id="send-btn">Send Selected Frame(s)</button>
   <button id="index-btn" class="secondary">Send Page Index</button>
   <div id="status">Ready</div>
 
   <script>
-    const BRIDGE = "http://localhost:3001";
+    const BRIDGE = "http://127.0.0.1:3002";
     const status = (t) => { document.getElementById("status").innerText = t; };
     const conn = (t) => { document.getElementById("conn").innerText = t; };
 
@@ -34,10 +34,10 @@
       parent.postMessage({ pluginMessage: { type: "export-page-index" } }, "*");
     };
 
-    // --- agent poll loop (pull mode) --------------------------------------
-    // The bridge holds a queue of commands the agent creates. We poll for
-    // them, forward each to the plugin main thread, and POST the result
-    // back once the main thread replies.
+    // --- agent command loop (long-poll) -----------------------------------
+    // The bridge HOLDS each request up to ~10s until a command arrives, so
+    // delivery is near-instant. On fetch error we back off 1.5s and retry —
+    // polling is self-healing across plugin reloads by design.
     const knownCommands = {}; // commandId -> type (for status display)
 
     async function deliverResult(msg) {
@@ -72,10 +72,11 @@
               },
             }, "*");
           }
+          // no sleep needed on success — the long-poll itself paces the loop
         } catch {
           conn("🔴 bridge offline — retrying");
+          await new Promise((r) => setTimeout(r, 1500));
         }
-        await new Promise((r) => setTimeout(r, 1500));
       }
     }
     pollAgent();
@@ -103,7 +104,7 @@
             status("❌ Server error response.");
           }
         } catch (err) {
-          status("❌ Is bridge-server running on port 3001?");
+          status("❌ Is the bridge running on port 3002? (npm run start:dev)");
         }
       }
 
@@ -114,9 +115,10 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(msg.payload),
           });
-          status(res.ok ? "✅ Page index stored (" + msg.payload.frames.length + " frames)" : "❌ Server error response.");
+          const n = (msg.payload.pages || []).reduce((a, p) => a + (p.children || []).length, 0);
+          status(res.ok ? "✅ Page index stored (" + n + " frames)" : "❌ Server error response.");
         } catch (err) {
-          status("❌ Is bridge-server running on port 3001?");
+          status("❌ Is the bridge running on port 3002? (npm run start:dev)");
         }
       }
     };

@@ -64,7 +64,10 @@ Open-source it (MIT) as a standalone repo + Figma Community plugin.
 - Another AI session actively reads design data through it.
 
 ### This repo — `figma-bridge/` (canonical home)
-Git `e7034c0`, typecheck clean. Contains the bridge server, the plugin source (dev copy), and docs.
+Contains the bridge server, the plugin source (canonical), docs, and the
+golden-diff tooling. **v3 (REST parity) is implemented**: extractor v3 +
+`/v1` routes + store v2 + security hardening + unit tests. See §4 for
+what remains (end-to-end verification + golden diff).
 
 ### Plugin extractor v2 — fully working
 - Full design trees: `id` / `name` / `type` / `x` / `y` / `width` / `height`, `children`
@@ -117,12 +120,24 @@ Programming/Figma/
 
 ## 4. Known gaps / honest status
 
-- **REST-parity output:** designed, not implemented. Extractor v2 uses its own JSON conventions (hex colors, `segments` for text, etc.).
-- **`/v1/...` routes:** not implemented.
-- **Golden diff:** not run (human REST token status uncertain).
-- **Dev plugin "Figma Agent":** not yet created (waiting on human — Phase A).
-- **Express bind address:** still binds all interfaces. **Security fix required in Phase C.**
-- **Frames dir:** the legacy webapp copy's `frames/` belongs to that session. This repo's `frames/` starts empty.
+- **End-to-end verification pending (human needed):** run `npm start`,
+  open the Figma Agent plugin in Figma, and exercise `/v1/files/:key`.
+  Code is typechecked and unit-tested (29 tests) but has NOT yet run
+  against the live plugin.
+- **Golden diff: not run** (human REST token status uncertain). The
+  harness exists: `npm run golden-diff` + `tools/normalize.ts`.
+- **Implemented in v3:** REST envelope + node schema (§7), `/v1` routes
+  (§8) incl. `?fresh=1` orchestration and `/v1/images`, store v2 keyed
+  by real file key, 127.0.0.1 bind + Host validation + CORS posture,
+  long-poll command queue, `characterStyleOverrides` +
+  `styleOverrideTable` (delta-based, deduped), SVG via base64 under
+  `_figmaAgent`, iterative traversal with a 20 000-node cap.
+- **Known follow-ups:** prototype fields (reactions/transitions) not yet
+  extracted; `geometry=paths` not supported; `?fresh=1` on very large
+  files pulls every frame sequentially (≤3 concurrent) and can take a
+  while — fine locally.
+- The legacy webapp copy's `frames/` belongs to that session. This repo
+  uses `store/<fileKey>/`.
 
 ---
 
@@ -138,21 +153,16 @@ Programming/Figma/
 
 ---
 
-## 6. Phase A — Wiring the dev instance *(human-led, AI assists)*
+## 6. Phase A — Wiring the dev instance *(DONE)*
 
-Human creates a new plugin in Figma Desktop: **Plugins → Development → New Plugin…**, names it `Figma Agent`, saves into `Programming/Figma/`. Then:
+The `Figma Agent/` dev plugin folder exists (created via the Figma
+wizard, id `1692298303631543959`), the repo source is synced into it via
+`npm run publish`, and it builds with typecheck + esbuild (bundle). The
+manifest has `networkAccess` → `localhost:3002` and
+`documentAccess: dynamic-page`. Old `Agent Plugin` / 3001 stays frozen.
 
-1. Copy repo `plugin/` source into the new folder.
-2. Patch `manifest.json`:
-   - `networkAccess.allowedDomains` → `["http://localhost:3002"]` (plus `https://api.figma.com` only if you add REST fallback)
-   - `networkAccess.reasoning` → explain local bridge communication
-   - `editorType` → `["figma", "figjam"]`
-   - `documentAccess` → `"dynamic-page"` (see §7.1 — this changes traversal semantics)
-3. Point `ui.html`'s `BRIDGE` constant at `http://127.0.0.1:3002`.
-4. Build.
-5. Old `Agent Plugin` / 3001 stays frozen as legacy.
-
-**AI role here:** produce the exact `manifest.json` and the one-line `ui.html` constant change. Do not run the publish step.
+**After any publish, a human must reopen the plugin in Figma** to load
+the new build.
 
 ---
 

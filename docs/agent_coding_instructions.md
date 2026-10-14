@@ -1,95 +1,97 @@
-# Agent Instructions: Local Figma Bridge
+# Agent Instructions: Figma Agent Bridge
 
 You are an agent using or developing this bridge. Read the rules first —
-other agent sessions may depend on the running infrastructure at any
-moment.
+other agent sessions may depend on running infrastructure at any moment.
 
-## Operating rules (important)
+## Operating rules (critical)
 
-1. **Port 3001 may be in use by another session's bridge.** Never kill
-   or restart a process on port 3001 without asking the human first —
-   another session may be mid-extraction.
-2. **`../Agent Plugin/` is the LIVE plugin folder** — it is loaded in
-   the Figma desktop app and other sessions depend on its data flow.
-   Never edit files in it directly.
-3. All plugin development happens in `plugin/` (the dev copy). Only
-   `npm run publish` (human-approved) syncs it to the live folder —
-   after which the human must reopen the plugin in Figma.
-4. To test server changes without touching the shared port:
-   `npm run start:dev` (port 3002). Point a dev-copy plugin's
-   `BRIDGE` URL at `http://localhost:3002` if you need an end-to-end
-   test.
+1. **Port 3001 and the `Agent Plugin/` folder are production (legacy).**
+   Never kill, restart, or edit them without explicit human permission.
+2. All development and testing happens here, on **port 3002** (this repo's
+   default) with the **Figma Agent** dev plugin.
+3. Plugin source edits happen only in `figma-bridge/plugin/`. They reach
+   the dev plugin folder exclusively via `npm run publish` (human-approved),
+   after which a human reopens the plugin in Figma.
+4. Humans run shared processes. AI sessions ask; they never manage servers.
 
 ## Layout
 
 ```
 Programming/Figma/
-├── Agent Plugin/       # LIVE plugin (loaded in Figma) — do not edit
+├── Agent Plugin/       # LIVE legacy plugin (port 3001 flow) — do not edit
+├── Figma Agent/        # DEV plugin (this repo's target) — port 3002
 └── figma-bridge/       # this repo
-    ├── bridge-server.ts  # express on :3001 (BRIDGE_PORT overrides) + MCP
-    ├── frames/           # every frame ever received, one JSON per frame
-    ├── plugin/           # dev copy of the plugin (code.ts, ui.html)
+    ├── bridge-server.ts  # express on :3002 + command queue + MCP + /v1 routes
+    ├── lib/stitch.ts     # pure envelope stitching (tested)
+    ├── plugin/           # canonical plugin source (code.ts, ui.html, lib/)
+    ├── store/            # received data, keyed by real Figma file key
+    │   └── <fileKey>/    # pages.json · frames/<id>.json · assets/
+    ├── tools/            # golden-diff harness (normalize + compare)
     └── docs/
 ```
 
-Run the bridge: `cd figma-bridge && npm start`.
+Run the bridge: `cd figma-bridge && npm start` (binds 127.0.0.1:3002).
+The plugin must be open in Figma (Plugins → Development → Figma Agent).
 
-## How frames arrive
+## REST-parity API (v3 — drop-in for api.figma.com clients)
 
-The Figma plugin has two commands (buttons in its UI):
+Point any Figma REST SDK client at `http://127.0.0.1:3002` with a dummy
+bearer token and it works unchanged:
 
-- **Send Selected Frame(s)** — full design trees of everything selected
-  (multi-select works). Each node exports: layout skeleton (x/y/size,
-  render bounds), auto-layout (mode/spacing/padding/alignment/wrap,
-  per-child layoutAlign/layoutGrow), fills and strokes as hex
-  (+opacity, gradient stops), corner radius (incl. per-corner +
-  smoothing), rotation, dashed + per-side strokes, blend mode,
-  clipping, text content + typography (per-range when styles vary
-  inside one node), effects (shadows + blurs), and **real SVG markup**
-  for vector/icon nodes.
-- **Send Page Index** — names, ids and sizes of every top-level frame
-  on the current page (cheap map, no trees).
+- `GET /v1/me`
+- `GET /v1/files/:key` — full REST envelope; `?ids=` filters top-level
+  frames, `?depth=N` prunes, `?fresh=1` re-pulls everything from the open
+  plugin (page-index, then each frame, ≤3 concurrent)
+- `GET /v1/files/:key/nodes?ids=1:2,1:3` — each tree nested at
+  `nodes[id].document` with its own component/style maps; missing frames
+  are pulled live if the plugin is open
+- `GET /v1/images/:key?ids=…&format=png|jpg|svg|pdf&scale=N` — plugin
+  `exportAsync` behind REST shapes; images served from
+  `http://127.0.0.1:3002/assets/…` and cached on disk
+- `GET /v1/files/:key/components` · `GET /v1/files/:key/styles`
 
-The bridge stores every received frame permanently as
-`frames/<id>.json` — nothing is overwritten by later sends of other
-frames; re-sending the same frame id refreshes its snapshot.
+The file `:key` is the **real Figma file key** (`figma.fileKey`). Data
+arrives either via the plugin's push buttons or the pull commands below;
+`?fresh=1` is the simplest "just get everything" option.
 
-## Pull mode (agent-initiated)
+Deviations from api.figma.com are documented in
+[rest-parity-deviations.md](rest-parity-deviations.md) and verified by
+`npm run golden-diff` (agent.md §9).
 
-The plugin polls the bridge for commands every ~1.5s while open. Queue
-a command and poll for the answer:
+## Pull-mode commands (agent-initiated)
+
+The open plugin long-polls the bridge (~10s holds, near-instant dispatch):
 
 ```bash
-# 0. Is the plugin open?
-curl -s localhost:3001/api/agent/status          # → pluginConnected
-
-# 1. Ask for something:
-curl -s -X POST localhost:3001/api/agent/commands -H 'Content-Type: application/json' \
-  -d '{"type":"page-index"}'                      # top-level frames of current page
-  -d '{"type":"frame","id":"247:448"}'            # full tree of one node id
-  -d '{"type":"selection"}'                       # whatever the user has selected
-# → {"requestId":"cmd_...","status":"pending"}
-
-# 2. Poll until success/error/timeout (plugin answers within ~2s):
-curl -s localhost:3001/api/agent/commands/<requestId>
+curl -s localhost:3002/api/agent/status                       # plugin open?
+curl -s -X POST localhost:3002/api/agent/commands -H 'Content-Type: application/json' \
+  -d '{"type":"page-index"}'                                  # all pages + top-level frames
+  -d '{"type":"frame","id":"247:448"}'                         # full REST-shaped tree
+  -d '{"type":"selection"}'                                    # current selection
+  -d '{"type":"export","ids":["247:448"],"format":"PNG","scale":2}'
+# → {"requestId":"cmd_…","status":"pending"}
+curl -s localhost:3002/api/agent/commands/<requestId>          # poll to success/error/timeout
 ```
 
-- Results of `frame`/`selection` commands are also persisted to
-  `frames/*.json`.
-- Commands time out after 20s — usually meaning the plugin is closed.
-  Tell the user to open it (Plugins → Development → Agent Plugin).
+Results of `frame`/`selection` persist to `store/<fileKey>/frames/`.
 
-## Push mode (manual)
+## Read endpoints (legacy agent flow, still working)
 
-Read stored frames directly from `frames/`, or:
+- `GET /api/frames` — index of all stored frames (all files)
+- `GET /api/frames/<node-id>` — one stored REST-shaped payload
+- `GET /api/latest` — most recent frame
+- `GET /api/page-index` — last stored page structure
+- `GET /api/health`, `GET /api/agent/status`
 
-- `GET /api/frames` — index of all frames
-- `GET /api/frames/<figma-node-id>` — one full tree (ids contain
-  colons, e.g. `247:448`)
-- `GET /api/page-index` — the last page index
-- `GET /api/latest` — most recently stored frame
-- `GET /api/health` — status + plugin connection state
+## Security posture
 
-Optional MCP tools (stdio, when spawned by an MCP client):
-`list_figma_frames`, `get_figma_frame {id}`, `get_latest_figma_frame`,
-`request_from_figma {type, id?}`.
+Loopback-only bind (127.0.0.1), Host-header allowlist, CORS restricted to
+the Figma plugin iframe (`Origin: null`) + loopback. Bearer tokens are
+accepted and ignored (SDK compatibility). Never disable these.
+
+## Testing
+
+- `npm run check` — typecheck (bridge + plugin projects)
+- `npm test` — vitest unit tests (mapping rules, text edge cases, stitching)
+- `npm run golden-diff` — parity proof against cached/live REST fixtures
+  (see agent.md §9 for the rate-limit discipline)

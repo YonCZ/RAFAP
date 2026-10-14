@@ -6,7 +6,9 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "types": ["node"]
   },
-  "include": ["bridge-server.ts"]
+  "include": ["bridge-server.ts", "lib/**/*.ts", "tools/**/*.ts", "tests/**/*.ts"]
 }
