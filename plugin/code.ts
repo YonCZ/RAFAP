@@ -117,8 +117,23 @@ figma.ui.onmessage = async (msg: any) => {
 // Page index (all pages — used by the bridge to stitch /v1/files envelopes)
 // ---------------------------------------------------------------------------
 
-function effectiveFileKey(): string {
-  return figma.fileKey ?? `local-${figma.root.id.replace(/:/g, "-")}`;
+/**
+ * Real file keys require `enablePrivatePluginApi` (private org plugins
+ * only — see the typings on figma.fileKey), which we deliberately don't
+ * require. Instead we derive a stable, file-unique local key from the
+ * file's page ids: deterministic, survives restarts, differs across files.
+ */
+async function effectiveFileKey(): Promise<string> {
+  if (figma.fileKey) return figma.fileKey;
+  await loadAllPagesSafe(); // all page ids must be visible for a stable hash
+  const ids = figma.root.children
+    .map((p) => p.id)
+    .sort()
+    .join(",");
+  // djb2 — deterministic, no dependencies
+  let h = 5381;
+  for (let i = 0; i < ids.length; i++) h = ((h << 5) + h + ids.charCodeAt(i)) >>> 0;
+  return `local-${h.toString(36)}`;
 }
 
 async function loadAllPagesSafe(): Promise<void> {
@@ -148,7 +163,7 @@ async function buildPageIndex() {
       })),
     };
   });
-  return { fileKey: effectiveFileKey(), pages };
+  return { fileKey: await effectiveFileKey(), pages };
 }
 
 // ---------------------------------------------------------------------------
@@ -172,7 +187,7 @@ async function extractFramePayload(node: SceneNode): Promise<Record<string, unkn
     componentSets,
     styles,
     schemaVersion: 0,
-    fileKey: effectiveFileKey(),
+    fileKey: await effectiveFileKey(),
     _figmaAgent: {
       source: "plugin",
       extractedAt: new Date().toISOString(),
@@ -195,7 +210,22 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
     if (++count > MAX_NODES_PER_EXTRACTION) {
       throw new Error(`frame too large: more than ${MAX_NODES_PER_EXTRACTION} nodes — split the extraction`);
     }
-    objByNode.set(node, await serializeNode(node, components, componentSets, styles));
+    let obj: Record<string, unknown>;
+    try {
+      obj = await serializeNode(node, components, componentSets, styles);
+    } catch (e) {
+      // Resilience: one bad node must never kill the whole frame. Emit the
+      // invariant core plus a visible marker under _figmaAgent (Rule B5).
+      obj = omitEmpty({
+        id: node.id,
+        name: node.name,
+        type: restNodeType(node.type),
+        visible: node.visible,
+        absoluteBoundingBox: absoluteBox(node),
+      });
+      figmaAgentExt(obj).error = `serialization failed: ${(e as Error).message}`;
+    }
+    objByNode.set(node, obj);
 
     if ("children" in node) {
       const kids = (node as BaseNode & { children: readonly SceneNode[] }).children;
@@ -358,8 +388,14 @@ async function serializeNode(
     }
     if (n.componentProperties) out.componentProperties = n.componentProperties;
   }
-  if ((node.type === "COMPONENT" || node.type === "COMPONENT_SET") && n.componentPropertyDefinitions) {
-    out.componentPropertyDefinitions = n.componentPropertyDefinitions;
+  if ((node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
+    // Variant components throw on this property (only non-variant components
+    // and component sets expose definitions) — read defensively.
+    try {
+      if (n.componentPropertyDefinitions) out.componentPropertyDefinitions = n.componentPropertyDefinitions;
+    } catch {
+      /* variant component — no property definitions exposed */
+    }
   }
   if (node.type === "COMPONENT") {
     registerComponent(node as ComponentNode, components, componentSets);
@@ -574,5 +610,5 @@ async function exportNodes(ids: string[], format = "PNG", scale = 2): Promise<Re
       images[id] = null;
     }
   }
-  return { images, fileKey: effectiveFileKey() };
+  return { images, fileKey: await effectiveFileKey() };
 }

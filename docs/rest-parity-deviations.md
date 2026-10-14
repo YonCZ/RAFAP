@@ -10,6 +10,7 @@ in a golden diff is a **BUG**.
 
 | # | Deviation | Rationale |
 |---|---|---|
+| 0 | The `:key` is a **locally derived file key** (`local-<hash of page ids>`), not the real Figma file key | `figma.fileKey` requires `enablePrivatePluginApi` — private organization plugins only. Local keys are stable per file and unique across files. Discover the current key via a `page-index` pull or `GET /api/page-index`. |
 | 1 | `name` is `"Figma Agent Local File"` | The plugin API cannot read the file's title (no such access). Agents can identify files by the real file key. |
 | 2 | `lastModified` = max `_figmaAgent.extractedAt` of stored frames | No server; we timestamp at extraction time. |
 | 3 | `version` = `local-<fileKey>` | No server-side version hashes. |
