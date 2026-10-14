@@ -12,9 +12,8 @@
   "ui": "ui.html",
   "networkAccess": {
     "allowedDomains": [
-      "http://127.0.0.1:3002",
       "http://localhost:3002"
     ],
-    "reasoning": "The plugin talks to a local bridge server (figma-agent) running on this machine to deliver design data to local AI agents."
+    "reasoning": "The plugin talks to a local bridge server (Figma Agent) running on this machine to deliver design data to local AI agents."
   }
 }
