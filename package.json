@@ -1,0 +1,25 @@
+{
+  "name": "figma-bridge",
+  "private": true,
+  "type": "module",
+  "description": "Local Figma → agent bridge: plugin-based design-tree extraction with push and pull modes, disk persistence, optional MCP.",
+  "scripts": {
+    "start": "tsx bridge-server.ts",
+    "start:dev": "BRIDGE_PORT=3002 tsx bridge-server.ts",
+    "check": "tsc -p tsconfig.json",
+    "publish": "cp plugin/code.ts plugin/ui.html \"../Agent Plugin/\" && cd \"../Agent Plugin\" && npm run build && echo 'synced to the live Agent Plugin folder — reopen the plugin in Figma to load it'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.5.4"
+  }
+}
