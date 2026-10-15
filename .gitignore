@@ -6,3 +6,5 @@ golden/
 .DS_Store
 dist/
 docs/golden-diff-report.md
+report.md
+agent.md
