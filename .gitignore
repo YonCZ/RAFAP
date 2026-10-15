@@ -4,3 +4,5 @@ store/
 golden/
 .spec/
 .DS_Store
+dist/
+docs/golden-diff-report.md

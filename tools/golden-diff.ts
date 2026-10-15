@@ -29,6 +29,7 @@ const REPORT = path.join(REPO, "docs", "golden-diff-report.md");
 interface Args {
   nodeId: string;
   fileKey: string;
+  localKey: string;
   bridge: string;
   token: string | null;
   depth?: number;
@@ -61,6 +62,7 @@ function parseArgs(argv: string[]): Args {
   return {
     nodeId: positional[0],
     fileKey: opts["file-key"] ?? "",
+    localKey: opts["local-key"] ?? opts["file-key"] ?? "",
     bridge: opts.bridge ?? "http://127.0.0.1:3002",
     token,
     depth: opts.depth ? Number(opts.depth) : undefined,
@@ -94,7 +96,7 @@ async function fetchRestFixture(args: Args, nodeId: string): Promise<any> {
 async function fetchOurs(args: Args, nodeId: string): Promise<any> {
   const qs = new URLSearchParams({ ids: nodeId });
   if (args.depth) qs.set("depth", String(args.depth));
-  const url = `${args.bridge}/v1/files/${args.fileKey}/nodes?${qs}`;
+  const url = `${args.bridge}/v1/files/${args.localKey}/nodes?${qs}`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`bridge fetch failed (${res.status}): ${await res.text()} — is the bridge running and the frame pulled?`);
   return res.json();
@@ -121,7 +123,12 @@ async function main() {
   if (!restNode) throw new Error(`REST fixture has no node ${nodeId}`);
   if (!oursNode) throw new Error(`bridge returned no node ${nodeId}`);
 
-  const diffs = diffTrees(normalize(restNode), normalize(oursNode));
+  // Diff the document trees — the component/style maps live at different
+  // scopes in REST (file-level) vs ours (frame-level) and are compared
+  // separately, informally.
+  const restDoc = restNode.document ?? restNode;
+  const oursDoc = oursNode.document ?? oursNode;
+  const diffs = diffTrees(normalize(restDoc), normalize(oursDoc));
   const pass = diffs.length === 0;
 
   const lines = [
@@ -147,11 +154,11 @@ async function main() {
   fs.writeFileSync(REPORT, lines.join("\n") + "\n");
   fs.writeFileSync(
     path.join(GOLDEN_DIR, `${nodeId.replace(/:/g, "_")}.ours.normalized.json`),
-    canonicalJson(oursNode) + "\n",
+    canonicalJson(oursDoc) + "\n",
   );
   fs.writeFileSync(
     path.join(GOLDEN_DIR, `${nodeId.replace(/:/g, "_")}.rest.normalized.json`),
-    canonicalJson(restNode) + "\n",
+    canonicalJson(restDoc) + "\n",
   );
 
   console.log(pass ? `✅ ${nodeId}: identical after normalization` : `❌ ${nodeId}: ${diffs.length} difference(s)`);

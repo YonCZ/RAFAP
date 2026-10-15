@@ -22,6 +22,7 @@ import {
   buildTextOverrides,
   buildTypeStyle,
   mapColor,
+  mapConstraints,
   mapEffects,
   mapPaints,
   omitEmpty,
@@ -196,10 +197,46 @@ async function extractFramePayload(node: SceneNode): Promise<Record<string, unkn
   };
 }
 
+// Local styles (even unused ones) belong in the file-level `styles` map —
+// REST includes them all. Ids are "S:<hash>,<nodeId>" — the suffix is the
+// file-local node id REST keys the map by.
+async function enumerateLocalStyles(styles: Record<string, unknown>): Promise<void> {
+  try {
+    const lists = await Promise.all([
+      (figma as any).getLocalPaintStylesAsync?.(),
+      (figma as any).getLocalTextStylesAsync?.(),
+      (figma as any).getLocalEffectStylesAsync?.(),
+      (figma as any).getLocalGridStylesAsync?.(),
+    ]);
+    for (const list of lists) {
+      if (!Array.isArray(list)) continue;
+      for (const st of list as any[]) {
+        const nodeId =
+          typeof st.id === "string" && st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
+        if (styles[nodeId]) continue;
+        styles[nodeId] = {
+          key: st.key,
+          name: st.name,
+          description: st.description ?? "",
+          remote: st.remote === true,
+          styleType: st.type,
+        };
+      }
+    }
+  } catch {
+    /* local style enumeration unavailable — referenced styles still resolve */
+  }
+}
+
 async function extractTree(root: SceneNode): Promise<ExtractionResult> {
   const components: Record<string, unknown> = {};
   const componentSets: Record<string, unknown> = {};
   const styles: Record<string, unknown> = {};
+
+  // REST's file-level `styles` map lists every local style (even unused
+  // ones) plus the remote styles referenced in the file — enumerate local
+  // styles up front so unused local styles appear too.
+  await enumerateLocalStyles(styles);
 
   const objByNode = new Map<BaseNode, Record<string, unknown>>();
   const stack: SceneNode[] = [root];
@@ -220,7 +257,7 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
         id: node.id,
         name: node.name,
         type: restNodeType(node.type),
-        visible: node.visible,
+        ...(node.visible === false ? { visible: false } : {}),
         absoluteBoundingBox: absoluteBox(node),
       });
       figmaAgentExt(obj).error = `serialization failed: ${(e as Error).message}`;
@@ -266,11 +303,47 @@ function absoluteBox(node: SceneNode): Record<string, number> | undefined {
   return { x: bb.x, y: bb.y, width: bb.width, height: bb.height };
 }
 
+/** REST emits layoutAlign/layoutGrow/layoutSizing only inside auto-layout trees. */
 function parentHasAutoLayout(node: BaseNode): boolean {
   const parent = node.parent;
   if (!parent || !("layoutMode" in parent)) return false;
   const mode = (parent as any).layoutMode;
   return mode && mode !== "NONE";
+}
+
+/** node.absoluteRenderBounds — REST emits this at the top level of every node. */
+function absoluteRenderBox(node: SceneNode): Record<string, number> | null {
+  const rb = (node as any).absoluteRenderBounds;
+  if (!rb) return null;
+  return { x: rb.x, y: rb.y, width: rb.width, height: rb.height };
+}
+
+/** Paints for REST's always-present fills/strokes/background arrays. */
+function paintArray(paints: unknown): Record<string, unknown>[] | string {
+  if (typeof paints === "symbol") return MIXED;
+  if (Array.isArray(paints)) return mapPaints(paints as Paint[]);
+  return [];
+}
+
+/** Frame backgroundColor — first VISIBLE solid fill's color, transparent otherwise. */
+function frameBackgroundColor(fills: unknown): { r: number; g: number; b: number; a: number } {
+  if (Array.isArray(fills)) {
+    for (const p of fills as {
+      type?: string;
+      visible?: boolean;
+      opacity?: number;
+      color?: { r: number; g: number; b: number; a?: number };
+    }[]) {
+      if (p && p.type === "SOLID" && p.visible !== false && p.color) {
+        // REST folds the paint's opacity into backgroundColor.a (while
+        // keeping it separate on fills); plugin solid colors carry no
+        // alpha of their own — measured.
+        const a = typeof p.opacity === "number" ? p.opacity : 1;
+        return { r: p.color.r, g: p.color.g, b: p.color.b, a };
+      }
+    }
+  }
+  return { r: 0, g: 0, b: 0, a: 0 };
 }
 
 async function serializeNode(
@@ -281,45 +354,70 @@ async function serializeNode(
 ): Promise<Record<string, unknown>> {
   const n = node as any;
 
-  // B1 — invariant core
+  // B1 — invariant core. `visible` is emitted only when false and the
+  // always-on REST fields (fills/strokes/effects/…) follow the emission
+  // rules measured against real GET /v1/files payloads.
   const out: Record<string, unknown> = omitEmpty({
     id: node.id,
     name: node.name,
     type: restNodeType(node.type),
-    visible: node.visible,
+    ...(node.visible === false ? { visible: false } : {}),
     absoluteBoundingBox: absoluteBox(node),
   });
+  // REST emits absoluteRenderBounds on every node — null when not rendered
+  out.absoluteRenderBounds = absoluteRenderBox(node);
 
   // B3 — mixed sentinels; B2 — omit absent like REST
   if (typeof n.opacity === "number" && n.opacity !== 1) out.opacity = n.opacity;
   if (n.blendMode && n.blendMode !== "NORMAL") out.blendMode = n.blendMode;
-  if (n.constraints) out.constraints = { horizontal: n.constraints.horizontal, vertical: n.constraints.vertical };
+  // constraints — REST emits them on every scene node; the plugin omits
+  // the property on GROUPs and auto-layout children. Defaults measured:
+  // GROUP/regular → LEFT/TOP, auto-layout child → SCALE/SCALE.
+  if (n.constraints) out.constraints = mapConstraints(n.constraints);
+  else
+    out.constraints = parentHasAutoLayout(node)
+      ? { horizontal: "SCALE", vertical: "SCALE" }
+      : { horizontal: "LEFT", vertical: "TOP" };
+  if (node.locked === true) out.locked = true;
 
-  // fills / strokes / background (paints may be figma.mixed)
-  for (const key of ["fills", "strokes", "background"]) {
-    const paints = n[key];
-    if (paints === undefined || paints === null) continue;
-    if (typeof paints === "symbol") {
-      out[key] = MIXED;
-      continue;
-    }
-    if (Array.isArray(paints) && paints.length) out[key] = mapPaints(paints);
-  }
+  // fills / strokes / effects / interactions / scrollBehavior — REST
+  // emits these on EVERY node (empty array / "SCROLLS" when unset).
+  out.fills = paintArray(n.fills);
+  out.strokes = paintArray(n.strokes);
+  out.effects = Array.isArray(n.effects) && n.effects.length ? mapEffects(n.effects) : [];
+  out.interactions = (Array.isArray(n.reactions) ? n.reactions : []).map((r: any) => ({
+    trigger: r?.trigger ?? null,
+    actions: (Array.isArray(r?.actions) ? r.actions : r?.action ? [r.action] : []).map((a: any) =>
+      a?.resetVideoPosition === false ? { ...a, resetVideoPosition: undefined } : a,
+    ),
+  }));
+  // The plugin has no API to read scrollBehavior — REST's default is
+  // SCROLLS; pinned (FIXED) frames are a documented deviation.
+  out.scrollBehavior = "SCROLLS";
 
-  // strokes geometry
-  if (Array.isArray(n.strokes) && n.strokes.length) {
-    if (n.strokeWeight !== undefined && n.strokeWeight !== null) {
-      out.strokeWeight = typeof n.strokeWeight === "symbol" ? MIXED : n.strokeWeight;
-    }
-    if (typeof n.strokeWeight === "symbol" && n.individualStrokeWeights) {
-      out.individualStrokeWeights = { ...n.individualStrokeWeights };
-    }
-    if (n.strokeAlign) out.strokeAlign = n.strokeAlign;
-    if (Array.isArray(n.strokeDashes) && n.strokeDashes.length) out.strokeDashes = n.strokeDashes;
-    if (n.dashPattern && Array.isArray(n.dashPattern) && n.dashPattern.length) {
-      out.strokeDashes = out.strokeDashes ?? n.dashPattern;
-    }
+  // stroke geometry — also on every node. Per-side weights surface as
+  // individualStrokeWeights when the sides are non-uniform; REST then
+  // reports the constant 1 as the scalar strokeWeight (measured: 41/41
+  // non-uniform nodes carry strokeWeight 1 — a placeholder, not the max).
+  const sides = [n.strokeTopWeight, n.strokeRightWeight, n.strokeBottomWeight, n.strokeLeftWeight];
+  if (new Set(sides).size > 1) {
+    out.individualStrokeWeights = {
+      top: n.strokeTopWeight,
+      right: n.strokeRightWeight,
+      bottom: n.strokeBottomWeight,
+      left: n.strokeLeftWeight,
+    };
+    out.strokeWeight = 1;
+  } else {
+    out.strokeWeight = typeof n.strokeWeight === "number" ? n.strokeWeight : 1;
   }
+  out.strokeAlign = n.strokeAlign ?? "INSIDE";
+  if (typeof n.strokeCap === "string" && n.strokeCap !== "NONE") out.strokeCap = n.strokeCap;
+  if (typeof n.strokeJoin === "string" && n.strokeJoin !== "MITER") out.strokeJoin = n.strokeJoin;
+  if (Array.isArray(n.strokeDashes) && n.strokeDashes.length) out.strokeDashes = n.strokeDashes;
+  else if (Array.isArray(n.dashPattern) && n.dashPattern.length) out.strokeDashes = n.dashPattern;
+  // BOOLEAN_OPERATION is the one type REST leaves this off (measured).
+  if (node.type !== "BOOLEAN_OPERATION") out.complexStrokeProperties = { strokeType: "BASIC" };
 
   // corner radii — uniform cornerRadius OR rectangleCornerRadii [TL,TR,BR,BL]
   if (typeof n.topLeftRadius === "number") {
@@ -333,40 +431,128 @@ async function serializeNode(
   } else if (typeof n.cornerRadius === "number" && n.cornerRadius !== 0) {
     out.cornerRadius = n.cornerRadius;
   }
-  if (typeof n.cornerSmoothing === "number" && n.cornerSmoothing) out.cornerSmoothing = n.cornerSmoothing;
+  // cornerSmoothing rides along whenever radii are emitted (measured: REST
+  // never emits smoothing without a radius, even when smoothing is set).
+  // Vectors with smoothing but no radius get zeroed radii + smoothing 0.
+  const hasRadii = out.cornerRadius !== undefined || out.rectangleCornerRadii !== undefined;
+  if (hasRadii) {
+    out.cornerSmoothing = n.cornerSmoothing ?? 0;
+  } else if (
+    node.type === "VECTOR" &&
+    n.isMask === true &&
+    typeof n.cornerSmoothing === "number" &&
+    n.cornerSmoothing > 0 &&
+    !(typeof n.cornerRadius === "number" && n.cornerRadius !== 0)
+  ) {
+    out.rectangleCornerRadii = [0, 0, 0, 0];
+    out.cornerSmoothing = 0;
+  }
 
-  // effects — shadows, blurs, noise, texture (nothing dropped)
-  if (Array.isArray(n.effects) && n.effects.length) out.effects = mapEffects(n.effects);
-
-  // auto-layout container properties (only when layoutMode is active — REST's omission behaviour)
+  // auto-layout container properties — only when layoutMode is active.
+  // Emission rules measured from REST: zero paddings and MIN axis
+  // alignments are omitted, sizing modes only surface FIXED (HUG/FILL
+  // moved into layoutSizing*), counterAxisSpacing only for WRAP.
   if (n.layoutMode && n.layoutMode !== "NONE") {
     Object.assign(
       out,
       omitEmpty({
         layoutMode: n.layoutMode,
-        layoutWrap: n.layoutWrap,
-        primaryAxisSizingMode: n.primaryAxisSizingMode,
-        counterAxisSizingMode: n.counterAxisSizingMode,
-        primaryAxisAlignItems: n.primaryAxisAlignItems,
-        counterAxisAlignItems: n.counterAxisAlignItems,
-        paddingLeft: n.paddingLeft,
-        paddingRight: n.paddingRight,
-        paddingTop: n.paddingTop,
-        paddingBottom: n.paddingBottom,
-        itemSpacing: typeof n.itemSpacing === "symbol" ? MIXED : n.itemSpacing,
-        counterAxisSpacing: typeof n.counterAxisSpacing === "symbol" ? MIXED : n.counterAxisSpacing,
-        layoutPositioning: n.layoutPositioning,
-        itemReverseZIndex: n.itemReverseZIndex,
-        strokesIncludedInLayout: n.strokesIncludedInLayout,
+        layoutWrap: n.layoutWrap ?? "NO_WRAP",
+        itemSpacing: typeof n.itemSpacing === "symbol" ? MIXED : n.itemSpacing || undefined,
+        ...(n.paddingTop ? { paddingTop: n.paddingTop } : {}),
+        ...(n.paddingRight ? { paddingRight: n.paddingRight } : {}),
+        ...(n.paddingBottom ? { paddingBottom: n.paddingBottom } : {}),
+        ...(n.paddingLeft ? { paddingLeft: n.paddingLeft } : {}),
+        ...(n.primaryAxisAlignItems && n.primaryAxisAlignItems !== "MIN"
+          ? { primaryAxisAlignItems: n.primaryAxisAlignItems } : {}),
+        ...(n.counterAxisAlignItems && n.counterAxisAlignItems !== "MIN"
+          ? { counterAxisAlignItems: n.counterAxisAlignItems } : {}),
+        ...(n.primaryAxisSizingMode === "FIXED" ? { primaryAxisSizingMode: "FIXED" } : {}),
+        ...(n.counterAxisSizingMode === "FIXED" ? { counterAxisSizingMode: "FIXED" } : {}),
+        ...(n.strokesIncludedInLayout === true ? { strokesIncludedInLayout: true } : {}),
+        ...(n.layoutWrap === "WRAP" && typeof n.counterAxisSpacing === "number"
+          ? { counterAxisSpacing: n.counterAxisSpacing } : {}),
       }),
     );
   }
-  if (n.clipsContent === true) out.clipsContent = true;
 
-  // how this node sits inside its parent's auto layout (child props)
+  // frame-like nodes: background paints, derived backgroundColor, real
+  // clipsContent — GROUPs and COMPONENT_SETs carry these too (measured)
+  if (
+    node.type === "FRAME" ||
+    node.type === "COMPONENT" ||
+    node.type === "INSTANCE" ||
+    node.type === "GROUP" ||
+    node.type === "COMPONENT_SET"
+  ) {
+    out.background = paintArray(n.backgrounds);
+    out.backgroundColor = frameBackgroundColor(n.fills);
+    out.clipsContent = n.clipsContent === true;
+  }
+
+  // masks + boolean operation type + arc data
+  if (n.isMask === true) {
+    out.isMask = true;
+    out.maskType = n.maskType ?? "ALPHA";
+  }
+  if (typeof n.booleanOperation === "string") out.booleanOperation = n.booleanOperation;
+  if (n.arcData && typeof n.arcData.startingAngle === "number") {
+    out.arcData = {
+      startingAngle: n.arcData.startingAngle,
+      endingAngle: n.arcData.endingAngle,
+      innerRadius: n.arcData.innerRadius,
+    };
+  }
+  // exposed component properties bound to this node (mostly TEXT in components)
+  if (n.componentPropertyReferences && Object.keys(n.componentPropertyReferences as object).length) {
+    out.componentPropertyReferences = n.componentPropertyReferences;
+  }
+  // frame prototype transitions (older API surface, read defensively)
+  if (typeof n.transitionDuration === "number") out.transitionDuration = n.transitionDuration;
+  if (typeof n.transitionEasing === "string") out.transitionEasing = n.transitionEasing;
+  if (typeof n.transitionNodeID === "string") out.transitionNodeID = n.transitionNodeID;
+
+  // how this node sits inside layouts — REST only emits these on children
+  // of auto-layout containers (layoutSizing also on auto-layout frames
+  // with non-auto-layout parents). BOOLEAN_OPERATION never carries them.
+  const layoutSizingApplies = parentHasAutoLayout(node) || (n.layoutMode && n.layoutMode !== "NONE");
   if (parentHasAutoLayout(node)) {
-    if (n.layoutAlign) out.layoutAlign = n.layoutAlign;
-    if (n.layoutGrow) out.layoutGrow = n.layoutGrow;
+    out.layoutAlign = n.layoutAlign ?? "INHERIT";
+    out.layoutGrow = typeof n.layoutGrow === "number" ? n.layoutGrow : 0;
+  }
+  if (layoutSizingApplies && node.type !== "BOOLEAN_OPERATION") {
+    out.layoutSizingHorizontal = n.layoutSizingHorizontal;
+    out.layoutSizingVertical = n.layoutSizingVertical;
+    if (out.layoutSizingHorizontal === undefined) delete out.layoutSizingHorizontal;
+    if (out.layoutSizingVertical === undefined) delete out.layoutSizingVertical;
+  }
+
+  // assorted REST node fields the plugin exposes directly
+  if (Array.isArray(n.layoutGrids) && n.layoutGrids.length) {
+    // REST grid objects carry no boundVariables — strip the plugin extra
+    out.layoutGrids = (n.layoutGrids as Record<string, unknown>[]).map((g) => {
+      const { boundVariables: _bv, ...grid } = g;
+      return grid;
+    });
+  }
+  if (Array.isArray(n.exportSettings) && n.exportSettings.length) {
+    // REST shape: {format, constraint (default SCALE 1 — even for SVG), suffix}
+    out.exportSettings = (n.exportSettings as any[]).map((es) => ({
+      format: es.format,
+      constraint: es.constraint ?? { type: "SCALE", value: 1 },
+      suffix: es.suffix ?? "",
+    }));
+  }
+  // aspect lock surfaces as preserveRatio + targetAspectRatio in REST, but
+  // only OUTSIDE auto-layout trees (inside them the layout drives sizing)
+  if (n.preserveRatio === true || (n.targetAspectRatio && typeof n.targetAspectRatio.x === "number")) {
+    if (!parentHasAutoLayout(node)) out.preserveRatio = true;
+  }
+  if (n.targetAspectRatio && typeof n.targetAspectRatio.x === "number") {
+    out.targetAspectRatio = { x: n.targetAspectRatio.x, y: n.targetAspectRatio.y };
+  }
+  if (n.boundVariables && Object.keys(n.boundVariables as object).length) {
+    out.boundVariables = n.boundVariables;
   }
 
   // text nodes — characters + style + per-character overrides (agent.md §7.3.8)
@@ -376,17 +562,29 @@ async function serializeNode(
 
   // components / instances
   if (node.type === "INSTANCE") {
-    const inst = node as InstanceNode;
+    // mainComponent THROWS (rather than returning null) for components on
+    // other pages under dynamic-page access — read it in its own try so the
+    // async fallback still runs.
+    let main: ComponentNode | null = null;
     try {
-      const main = inst.mainComponent ?? (await inst.getMainComponentAsync().catch(() => null));
-      if (main) {
-        out.componentId = main.id;
-        registerComponent(main, components, componentSets);
-      }
+      main = (node as InstanceNode).mainComponent;
     } catch {
-      /* main component inaccessible (library not loaded) — componentId omitted */
+      /* cross-page component under dynamic-page */
     }
-    if (n.componentProperties) out.componentProperties = n.componentProperties;
+    if (!main) {
+      try {
+        main = await (node as InstanceNode).getMainComponentAsync();
+      } catch {
+        /* main component unavailable */
+      }
+    }
+    if (main) {
+      out.componentId = main.id;
+      registerComponent(main, components, componentSets);
+    }
+    if (n.componentProperties && Object.keys(n.componentProperties as object).length) {
+      out.componentProperties = n.componentProperties;
+    }
   }
   if ((node.type === "COMPONENT" || node.type === "COMPONENT_SET")) {
     // Variant components throw on this property (only non-variant components
@@ -404,26 +602,47 @@ async function serializeNode(
     registerComponentSet(node as ComponentSetNode, componentSets);
   }
 
-  // bound styles — REST emits `styles` (ids) on nodes, metadata at file level
-  if (n.styles && Object.keys(n.styles).length) {
-    out.styles = { ...n.styles };
-    for (const id of Object.values(n.styles as Record<string, string>)) {
-      if (id && !styles[id]) {
-        try {
-          const st = await figma.getStyleByIdAsync(id);
-          if (st) {
-            styles[id] = {
-              key: st.id,
-              name: st.name,
-              description: st.description ?? "",
-              remote: (st as any).remote === true,
-              styleType: (st as any).styleType,
-            };
-          }
-        } catch {
-          /* style unresolvable — referenced id still emitted on the node */
+  // bound styles — the plugin's *StyleId properties return "" when unbound
+  // and a style KEY ("S:<hash>,<id>") when bound; REST node.styles carries
+  // the style's node id and the file-level map is keyed by it.
+  const styleBindings = omitEmpty({
+    fill: typeof n.fillStyleId === "string" && n.fillStyleId ? n.fillStyleId : undefined,
+    stroke: typeof n.strokeStyleId === "string" && n.strokeStyleId ? n.strokeStyleId : undefined,
+    effect: typeof n.effectStyleId === "string" && n.effectStyleId ? n.effectStyleId : undefined,
+    text: typeof n.textStyleId === "string" && n.textStyleId ? n.textStyleId : undefined,
+    grid: typeof n.gridStyleId === "string" && n.gridStyleId ? n.gridStyleId : undefined,
+  });
+  if (Object.keys(styleBindings).length) {
+    out.styles = styleBindings;
+    for (const [field, id] of Object.entries(styleBindings as Record<string, string>)) {
+      if (styles[id]) continue;
+      try {
+        const st = await figma.getStyleByIdAsync(id);
+        if (st) {
+          // plugin style ids look like "S:<hash>,<nodeId>" — for local
+          // styles the suffix is the file-local node id REST emits. Remote
+          // (library) styles keep their local marker id (deviation: REST
+          // uses the library file's id, which the plugin cannot see).
+          const nodeId = st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
+          styles[nodeId] = {
+            key: st.key,
+            name: st.name,
+            description: st.description ?? "",
+            remote: (st as any).remote === true,
+            styleType: (st as any).type, // BaseStyle.type: 'PAINT' | 'TEXT' | 'EFFECT' | 'GRID' | …
+          };
+          (styleBindings as Record<string, string>)[field] = nodeId;
         }
+      } catch {
+        /* style unresolvable — referenced id still emitted on the node */
       }
+    }
+    // REST emits plural aliases alongside the singular binding keys on
+    // frame-like nodes (measured: every styled FRAME/INSTANCE has both).
+    if (node.type === "FRAME" || node.type === "COMPONENT" || node.type === "INSTANCE") {
+      const sb = styleBindings as Record<string, string>;
+      if (sb.fill) sb.fills = sb.fill;
+      if (sb.stroke) sb.strokes = sb.stroke;
     }
   }
 
@@ -486,6 +705,18 @@ function serializeText(t: TextNode): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   out.characters = t.characters;
 
+  // REST emits lineHeightPx even for intrinsic (AUTO) line heights — it
+  // computes real font metrics server-side. The plugin cannot read font
+  // metrics; for texts whose height is driven by their lines (auto-height),
+  // rendered height ÷ line count IS the line height. Best-effort estimate,
+  // see docs/rest-parity-deviations.md.
+  const lineTypes = (t as any).lineTypes as string[] | undefined;
+  const lineCount = lineTypes?.length ?? t.characters.split(/\r\n|\r|\n/).length;
+  let intrinsicLineHeightPx: number | undefined;
+  if (lineCount > 0 && (t.textAutoResize === "HEIGHT" || t.textAutoResize === "WIDTH_AND_HEIGHT")) {
+    intrinsicLineHeightPx = t.height / lineCount;
+  }
+
   let segments: SegmentInput[] = [];
   try {
     const raw = t.getStyledTextSegments([
@@ -508,6 +739,7 @@ function serializeText(t: TextNode): Record<string, unknown> {
         fontSize: s.fontSize,
         letterSpacing: s.letterSpacing,
         lineHeight: s.lineHeight,
+        intrinsicLineHeightPx,
         textDecoration: s.textDecoration,
         textCase: s.textCase,
         paragraphSpacing: s.paragraphSpacing,
@@ -515,11 +747,21 @@ function serializeText(t: TextNode): Record<string, unknown> {
         textAlignHorizontal: t.textAlignHorizontal,
         textAlignVertical: t.textAlignVertical,
         fills: s.fills,
+        // segment styles carry fills — the override-table deltas keep them
+        includeFills: true,
       };
       return { start: s.start, end: s.end, style: buildTypeStyle(source) };
     });
   } catch {
     /* fonts unavailable — fall back to node-level aggregate below */
+  }
+
+  // Mixed-fill texts: the plugin only exposes the MIXED sentinel on the
+  // node, but REST emits the default segment's paint as the node-level
+  // fills (measured) — reuse the first segment's mapped fills.
+  if (typeof (t as any).fills === "symbol" && segments.length) {
+    const segFills = segments[0].style.fills;
+    if (Array.isArray(segFills)) out.fills = segFills;
   }
 
   let style: Record<string, unknown>;
@@ -541,6 +783,7 @@ function serializeText(t: TextNode): Record<string, unknown> {
       fontWeight: typeof fn?.style === "string" ? fontWeightFromStyle(fn.style) : undefined,
       letterSpacing: deMixed<LetterSpacing>(t.letterSpacing),
       lineHeight: deMixed<LineHeight>(t.lineHeight),
+      intrinsicLineHeightPx,
       textDecoration: deMixed<"NONE" | "STRIKETHROUGH" | "UNDERLINE">(t.textDecoration),
       textCase: deMixed<TextCase>(t.textCase),
       paragraphSpacing: deMixed<number>(t.paragraphSpacing),
@@ -554,23 +797,18 @@ function serializeText(t: TextNode): Record<string, unknown> {
     styleOverrideTable = {};
   }
 
-  // node-level text properties REST puts inside `style`
-  const styleExtras = omitEmpty({
-    textAutoResize: t.textAutoResize,
-    textTruncation: (t as any).textTruncation,
-    maxLines: (t as any).maxLines,
-  });
-  Object.assign(style, styleExtras);
+  // node-level text properties REST puts inside `style` (omits NONE)
+  if (t.textAutoResize && t.textAutoResize !== "NONE") style.textAutoResize = t.textAutoResize;
 
   out.style = style;
   out.characterStyleOverrides = characterStyleOverrides;
   out.styleOverrideTable = styleOverrideTable;
   // lineTypes/lineIndentations are newer plugin APIs — read defensively and
   // default to one "NONE" line per paragraph like REST does for plain text.
-  const lineCount = t.characters.split(/\r\n|\r|\n/).length;
-  out.lineTypes = ((t as any).lineTypes as string[] | undefined) ?? new Array(lineCount).fill("NONE");
+  const fallbackLineCount = t.characters.split(/\r\n|\r|\n/).length;
+  out.lineTypes = lineTypes ?? new Array(fallbackLineCount).fill("NONE");
   out.lineIndentations =
-    ((t as any).lineIndentations as number[] | undefined) ?? new Array(lineCount).fill(0);
+    ((t as any).lineIndentations as number[] | undefined) ?? new Array(fallbackLineCount).fill(0);
   return out;
 }
 

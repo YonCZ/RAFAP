@@ -1,78 +1,82 @@
-# Figma Agent
+# RAFAP — Rest API Figma Agent Plugin
 
-Local, rate-limit-free design-data pipeline from the Figma desktop app to
-AI coding agents — with **REST API parity**: point any Figma REST SDK
-client at `http://127.0.0.1:3002` with a dummy token and it works
-unchanged.
+A local **drop-in replacement for the Figma REST API** (`GET /v1/files/:key`,
+`GET /v1/files/:key/nodes`): a Figma plugin + loopback bridge server that
+serves your open Figma file through an API-shaped surface with **no rate
+limits, no tokens, and no cloud round-trips**. Point any Figma REST client at
+`http://127.0.0.1:3001/v1` and it just works.
 
-```
-Figma desktop app
-  └── Figma Agent plugin (extracts REST-shaped design trees:
-      fills as {r,g,b} floats, characterStyleOverrides + styleOverrideTable,
-      auto-layout, per-corner radii, effects, components — plus SVG markup
-      for vectors, which the real API cannot do)
-        │  push (buttons) and pull (agent commands, long-polled)
-        ▼
-      bridge (express, loopback-only)
-        │  /v1/files/:key · /v1/files/:key/nodes · /v1/images/:key · /v1/me
-        │  agent command queue · optional MCP tools
-        ▼
-      store/<fileKey>/ — permanent local cache (pages, frames, assets)
-```
+Built for AI agents and local tooling that keep hitting Figma's API rate
+limits while iterating on design data.
 
-Why not the Figma REST API? Rate-limited (429s on file-content
-endpoints in practice on the free tier), needs a personal access token,
-and cannot export SVG or per-range text styles. The plugin runs inside
-the live document — strictly more capable, zero rate limits.
-
-- **Push mode**: select frames → plugin sends full trees
-- **Pull mode**: agent queues `page-index` / `frame {id}` / `selection` /
-  `export {ids}` — the open plugin executes and returns fresh data
-  (`?fresh=1` on `/v1/files/:key` pulls the whole document)
-- REST parity verified by a **golden diff** against api.figma.com
-  responses (normalized deep-compare)
-- No cloud, no tokens for our own usage, loopback-only by construction
-
-## Install
-
-See [docs/human_setup_connection_guide.md](docs/human_setup_connection_guide.md)
-— Figma Desktop plugin wizard, one manifest patch, `npm install`.
-
-## Use
-
-See [docs/agent_coding_instructions.md](docs/agent_coding_instructions.md)
-— routes, the pull-mode command flow, operating rules for agents.
-
-Deviations from api.figma.com are documented and intentional:
-[docs/rest-parity-deviations.md](docs/rest-parity-deviations.md).
-
-## Repo layout
+## How it works
 
 ```
-bridge-server.ts      express (127.0.0.1:3002) + /v1 routes + command queue + MCP
-lib/stitch.ts         pure envelope stitching (unit-tested)
-plugin/               canonical plugin source (code.ts, ui.html, lib/rest-mapping.ts)
-tools/                golden-diff harness (normalize + compare vs REST)
-tests/                vitest unit tests (mapping rules, text edge cases, stitching)
-store/                received data, keyed by real Figma file key (gitignored)
-docs/                 human + agent guides, parity deviations
-agent.md              full project context + spec (read this first)
+Figma desktop app ── plugin (long-poll) ──> bridge server (127.0.0.1:3001)
+                                                │
+REST clients / agents ── GET /v1/files/... ──────┘
 ```
+
+1. The **plugin** (`plugin/`) walks the live document and serializes it into
+   REST-shaped JSON, applying ~40 emission rules measured against real
+   `api.figma.com` payloads (see `docs/rest-parity-deviations.md`).
+2. The **bridge** (`bridge-server.ts`) exposes the `/v1` surface, caches
+   extractions in a content-addressed store (`store/`), and forwards agent
+   commands to the plugin.
+3. `GET /v1/files/:key/nodes?ids=248:563` auto-pulls the frame live if the
+   plugin is connected; otherwise the cached copy is served.
+
+## Quick start
+
+```bash
+npm install
+npm run check          # typecheck bridge + plugin
+npm run build:plugin   # bundle the plugin to dist/plugin/
+npm start              # bridge on 127.0.0.1:3001
+```
+
+Then in Figma: **Plugins → Development → Import plugin from manifest…** and
+select `dist/plugin/manifest.json`. Open the plugin, and:
+
+```bash
+curl http://127.0.0.1:3001/v1/files/local-<key>
+```
+
+Find your file's local key via `curl http://127.0.0.1:3001/api/page-index`.
+
+## API surface
+
+| Endpoint | Parity |
+|---|---|
+| `GET /v1/files/:key` | Full document tree, `components`, `componentSets`, `styles` |
+| `GET /v1/files/:key/nodes?ids=a,b` | Per-node subtrees, live auto-pull |
+| `GET /v1/files/:key/components`, `/styles` | Best-effort from stored frames |
+| `GET /v1/files/:key/images/:ref` | Image bytes by ref |
+| `GET /v1/me` | Local identity stub |
+
+Also: `?fresh=1` to force re-extraction (extension), and `_figmaAgent.svgBase64`
+on shape nodes — inline SVG exports, which the real REST API cannot do at all.
+
+## Fidelity
+
+Verified against a real 2,361-node / 32-frame file via a golden-diff harness
+(`tools/golden-diff.ts`): document tree structure matches **exactly** (same
+ids, same order, same shapes). Remaining differences are documented plugin-API
+limits — see `report.md` and `docs/rest-parity-deviations.md`.
+
+## Security
+
+- Bridge binds **loopback only** (`127.0.0.1`); no external interface.
+- `networkAccess.allowedDomains` pins the plugin to the bridge origin.
+- No secrets in the repo; the Figma REST token (if you use one for golden
+  tests) lives in `~/.figma-token`, never committed.
 
 ## Development
 
 ```bash
-npm start             # bridge on 127.0.0.1:3002 (dev default)
-npm run check         # typecheck both projects (bridge + plugin)
-npm test              # vitest unit tests
-npm run golden-diff   # parity proof vs api.figma.com fixtures
-npm run publish       # sync plugin/ into ../Figma Agent/ + build (human-approved)
+npm run check    # tsc for bridge + plugin
+npm test         # vitest unit tests (mapping rules)
+npm run publish  # sync build to a dev plugin folder
 ```
 
-The live plugin folder (`../Figma Agent/`, loaded in Figma) is treated as
-production: edits happen in `plugin/` and reach it only via
-`npm run publish`, followed by reopening the plugin in Figma.
-
-## License
-
-MIT (see LICENSE when published).
+`agent.md` is the spec of record. MIT licensed — see `LICENSE`.

@@ -74,6 +74,10 @@ export function mapPaint(paint: Paint): Record<string, unknown> {
     visible: p.visible === false ? false : undefined, // REST emits visible only when false
     opacity: typeof p.opacity === "number" && p.opacity !== 1 ? p.opacity : undefined,
     blendMode: (p.blendMode as string) ?? "NORMAL",
+    // variable bindings ride along on the paint (e.g. {color: VariableAlias})
+    boundVariables: p.boundVariables && Object.keys(p.boundVariables as object).length
+      ? p.boundVariables
+      : undefined,
   });
 
   switch (paint.type) {
@@ -104,10 +108,17 @@ export function mapPaint(paint: Paint): Record<string, unknown> {
         ...base,
         type: paint.type,
         gradientHandlePositions: handles,
-        gradientStops: (paint.gradientStops ?? []).map((s) => ({
-          position: s.position,
-          color: mapColor(s.color, s.color.a ?? 1),
-        })),
+        gradientStops: (paint.gradientStops ?? []).map((s) => {
+          const sv = s as unknown as Record<string, unknown>;
+          return omitEmpty({
+            position: s.position,
+            color: mapColor(s.color, s.color.a ?? 1),
+            boundVariables:
+              sv.boundVariables && Object.keys(sv.boundVariables as object).length
+                ? sv.boundVariables
+                : undefined,
+          });
+        }),
       };
     }
 
@@ -115,22 +126,29 @@ export function mapPaint(paint: Paint): Record<string, unknown> {
       const img = paint as unknown as {
         scaleMode?: string;
         imageRef?: string | null;
+        imageHash?: string | null;
         imageTransform?: unknown;
         scalingFactor?: number;
         rotation?: number;
-        filters?: unknown;
+        filters?: Record<string, number>;
       };
       // Plugin "CROP" is REST "STRETCH" (same UI mode, different names).
       const scaleMode = img.scaleMode === "CROP" ? "STRETCH" : img.scaleMode;
+      // REST omits filters when they are all defaults and rotation when 0.
+      // The plugin renamed imageRef → imageHash (same 40-hex value).
+      const filters =
+        img.filters && Object.values(img.filters).some((v) => v !== 0 && v !== undefined)
+          ? img.filters
+          : undefined;
       return omitEmpty({
         ...base,
         type: "IMAGE",
         scaleMode,
-        imageRef: img.imageRef ?? undefined,
+        imageRef: img.imageHash ?? img.imageRef ?? undefined,
         imageTransform: scaleMode === "STRETCH" ? img.imageTransform : undefined,
         scalingFactor: scaleMode === "TILE" ? img.scalingFactor : undefined,
-        rotation: img.rotation,
-        filters: img.filters,
+        rotation: typeof img.rotation === "number" && img.rotation !== 0 ? img.rotation : undefined,
+        filters,
       });
     }
 
@@ -158,18 +176,18 @@ export function mapEffects(effects: readonly Effect[]): Record<string, unknown>[
       case "DROP_SHADOW":
       case "INNER_SHADOW": {
         const color = (eff.color as { r: number; g: number; b: number; a?: number }) ?? { r: 0, g: 0, b: 0, a: 1 };
-        out.push(
-          omitEmpty({
-            type: e.type,
-            color: mapColor(color, color.a ?? 1),
-            blendMode: (eff.blendMode as string) ?? "NORMAL",
-            offset: eff.offset ? { x: (eff.offset as any).x, y: (eff.offset as any).y } : { x: 0, y: 0 },
-            radius: eff.radius as number,
-            spread: eff.spread as number | undefined,
-            visible: eff.visible !== false,
-            showShadowBehindNode: eff.showShadowBehindNode === true,
-          }),
-        );
+        const shadow = omitEmpty({
+          type: e.type,
+          color: mapColor(color, color.a ?? 1),
+          blendMode: (eff.blendMode as string) ?? "NORMAL",
+          offset: eff.offset ? { x: (eff.offset as any).x, y: (eff.offset as any).y } : { x: 0, y: 0 },
+          radius: eff.radius as number,
+          visible: eff.visible !== false,
+          showShadowBehindNode: eff.showShadowBehindNode === true,
+        });
+        // REST emits spread only when set (zero-spread shadows omit it — measured)
+        if (typeof eff.spread === "number" && eff.spread !== 0) shadow.spread = eff.spread;
+        out.push(shadow);
         break;
       }
       case "LAYER_BLUR":
@@ -183,6 +201,39 @@ export function mapEffects(effects: readonly Effect[]): Record<string, unknown>[
     }
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Constraints — plugin enums differ from REST (measured from real payloads)
+// ---------------------------------------------------------------------------
+
+/**
+ * Plugin layout constraints use MIN/CENTER/MAX/STRETCH; REST uses the
+ * user-facing LEFT/RIGHT/LEFT_RIGHT (and TOP/BOTTOM/TOP_BOTTOM) names.
+ */
+const CONSTRAINT_HORIZONTAL: Record<string, string> = {
+  MIN: "LEFT",
+  CENTER: "CENTER",
+  MAX: "RIGHT",
+  STRETCH: "LEFT_RIGHT",
+  SCALE: "SCALE",
+};
+const CONSTRAINT_VERTICAL: Record<string, string> = {
+  MIN: "TOP",
+  CENTER: "CENTER",
+  MAX: "BOTTOM",
+  STRETCH: "TOP_BOTTOM",
+  SCALE: "SCALE",
+};
+
+export function mapConstraints(c: { horizontal?: string; vertical?: string }): {
+  horizontal?: string;
+  vertical?: string;
+} {
+  return {
+    horizontal: CONSTRAINT_HORIZONTAL[c.horizontal ?? ""] ?? c.horizontal,
+    vertical: CONSTRAINT_VERTICAL[c.vertical ?? ""] ?? c.vertical,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,6 +258,18 @@ export interface StyleSource {
   textAlignHorizontal?: string;
   textAlignVertical?: string;
   fills?: readonly Paint[];
+  /**
+   * REST emits lineHeightPx even for intrinsic (AUTO) line heights — it
+   * computes real font metrics server-side. The plugin cannot read font
+   * metrics; the caller estimates it (node height ÷ rendered line count)
+   * and passes it here. Only used when the unit is AUTO.
+   */
+  intrinsicLineHeightPx?: number;
+  /**
+   * Per-segment styles carry fills (REST's styleOverrideTable deltas keep
+   * them); the published default `style` never has fills.
+   */
+  includeFills?: boolean;
 }
 
 /** "Inter" + "Semi Bold" → "Inter-SemiBold" */
@@ -224,33 +287,66 @@ export function mapLetterSpacing(ls: LetterSpacing | undefined, fontSize: number
   return undefined;
 }
 
-/** REST line height: lineHeightPx / lineHeightPercent / lineHeightUnit. */
-export function mapLineHeight(lh: LineHeight | undefined): Record<string, unknown> {
+/**
+ * REST line height — always three fields (measured from real payloads):
+ *   PIXELS    → lineHeightPx + lineHeightPercentFontSize (px ÷ fontSize × 100)
+ *   PERCENT   → lineHeightUnit FONT_SIZE_% + lineHeightPercentFontSize
+ *   AUTO      → lineHeightUnit INTRINSIC_% + lineHeightPercent 100
+ *               (+ lineHeightPx = the font's intrinsic metric)
+ *
+ * REST additionally emits lineHeightPercent for PIXELS (px ÷ intrinsic —
+ * needs server-side font metrics) which we cannot compute; omitted, see
+ * docs/rest-parity-deviations.md.
+ */
+export function mapLineHeight(
+  lh: LineHeight | undefined,
+  fontSize?: number,
+  intrinsicLineHeightPx?: number,
+): Record<string, unknown> {
   if (!lh) return {};
-  if (lh.unit === "PIXELS") return { lineHeightPx: lh.value, lineHeightUnit: "PIXELS" };
-  if (lh.unit === "AUTO") return { lineHeightUnit: "INTRINSIC_%", lineHeightPercent: 100 };
-  return {};
+  if (lh.unit === "PIXELS") {
+    const out: Record<string, unknown> = { lineHeightPx: lh.value, lineHeightUnit: "PIXELS" };
+    if (typeof fontSize === "number" && fontSize > 0) {
+      out.lineHeightPercentFontSize = (lh.value / fontSize) * 100;
+    }
+    return out;
+  }
+  if (lh.unit === "PERCENT") {
+    return { lineHeightUnit: "FONT_SIZE_%", lineHeightPercentFontSize: lh.value };
+  }
+  // AUTO — intrinsic
+  const out: Record<string, unknown> = { lineHeightUnit: "INTRINSIC_%", lineHeightPercent: 100 };
+  if (typeof intrinsicLineHeightPx === "number" && intrinsicLineHeightPx > 0) {
+    out.lineHeightPx = intrinsicLineHeightPx;
+  }
+  return out;
 }
 
 /** Build a REST TypeStyle object from a de-mixed style source. */
 export function buildTypeStyle(s: StyleSource): Record<string, unknown> {
-  return omitEmpty({
+  const out = omitEmpty({
     fontFamily: s.fontFamily,
-    fontPostScriptName: s.fontFamily && s.fontStyle ? fontPostScriptName(s.fontFamily, s.fontStyle) : undefined,
     fontStyle: s.fontStyle,
     fontWeight: s.fontWeight,
     fontSize: s.fontSize,
     textAlignHorizontal: s.textAlignHorizontal,
     textAlignVertical: s.textAlignVertical,
-    letterSpacing: mapLetterSpacing(s.letterSpacing, s.fontSize),
-    ...mapLineHeight(s.lineHeight),
-    textCase: s.textCase,
-    textDecoration: s.textDecoration,
-    italic: s.fontStyle?.toLowerCase().includes("italic") ? true : undefined,
-    paragraphSpacing: s.paragraphSpacing,
-    paragraphIndent: s.paragraphIndent,
-    fills: s.fills ? mapPaints(s.fills) : undefined,
+    // REST always emits letterSpacing — 0.0 when unset.
+    letterSpacing: mapLetterSpacing(s.letterSpacing, s.fontSize) ?? 0,
+    ...mapLineHeight(s.lineHeight, s.fontSize, s.intrinsicLineHeightPx),
+    // conditional text props — REST omits the defaults
+    textCase: s.textCase && s.textCase !== "ORIGINAL" ? s.textCase : undefined,
+    textDecoration: s.textDecoration && s.textDecoration !== "NONE" ? s.textDecoration : undefined,
+    paragraphSpacing: s.paragraphSpacing ? s.paragraphSpacing : undefined,
+    paragraphIndent: s.paragraphIndent ? s.paragraphIndent : undefined,
+    fills: s.includeFills && s.fills ? mapPaints(s.fills) : undefined,
   });
+  // REST emits fontPostScriptName on every style, null in the overwhelming
+  // majority of cases (the resolution rule is server-side and not exposed
+  // to plugins — see docs/rest-parity-deviations.md). fontFamily/style/weight
+  // carry the full information.
+  out.fontPostScriptName = null;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,11 +368,25 @@ export interface TextOverrides {
   styleOverrideTable: Record<string, Record<string, unknown>>;
 }
 
-/** Only the keys where `segment` differs from `default`. */
+/** The font-identity fields REST keeps together in override entries. */
+const FONT_KEYS = ["fontFamily", "fontPostScriptName", "fontStyle", "fontWeight"] as const;
+
+/**
+ * Only the keys where `segment` differs from `default`.
+ *
+ * Font identity travels as a group (measured from REST payloads): when any
+ * of fontFamily/fontPostScriptName/fontStyle/fontWeight differs, all four
+ * appear in the override entry even if some are unchanged.
+ */
 function styleDelta(defaultStyle: Record<string, unknown>, segment: Record<string, unknown>): Record<string, unknown> {
   const delta: Record<string, unknown> = {};
   for (const k of Object.keys(segment)) {
     if (!deepEqual(segment[k], defaultStyle[k])) delta[k] = segment[k];
+  }
+  if (FONT_KEYS.some((k) => k in delta)) {
+    for (const k of FONT_KEYS) {
+      if (k in segment && !(k in delta)) delta[k] = segment[k];
+    }
   }
   return delta;
 }
@@ -294,12 +404,17 @@ export function buildTextOverrides(characters: string, segments: SegmentInput[])
 
   const overrides = new Array<number>(characters.length).fill(0);
   const table: Record<string, Record<string, unknown>> = {};
-  const defaultStyle = segments[0].style;
+  // REST publishes the default style WITHOUT fills (0/523 real payloads
+  // have fills in `style`) while override deltas DO carry them — so the
+  // delta baseline keeps fills, the published style drops them.
+  const defaultFull = segments[0].style;
+  const style: Record<string, unknown> = { ...defaultFull };
+  delete style.fills;
   let nextId = 1;
 
   for (const seg of segments) {
-    if (deepEqual(seg.style, defaultStyle)) continue; // 0 = default
-    const delta = styleDelta(defaultStyle, seg.style);
+    if (deepEqual(seg.style, defaultFull)) continue; // 0 = default
+    const delta = styleDelta(defaultFull, seg.style);
     if (!Object.keys(delta).length) continue;
 
     // Dedup: identical deltas share one table entry.
@@ -323,5 +438,5 @@ export function buildTextOverrides(characters: string, segments: SegmentInput[])
   // REST trims trailing zeros — characters beyond the array use the default.
   while (overrides.length > 0 && overrides[overrides.length - 1] === 0) overrides.pop();
 
-  return { style: defaultStyle, characterStyleOverrides: overrides, styleOverrideTable: table };
+  return { style, characterStyleOverrides: overrides, styleOverrideTable: table };
 }

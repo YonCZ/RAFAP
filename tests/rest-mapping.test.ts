@@ -8,6 +8,7 @@ import {
   buildTypeStyle,
   deepEqual,
   fontPostScriptName,
+  mapConstraints,
   mapEffects,
   mapLetterSpacing,
   mapLineHeight,
@@ -100,7 +101,7 @@ describe("mapEffects", () => {
 });
 
 describe("TypeStyle building", () => {
-  it("fontPostScriptName composes family + style", () => {
+  it("fontPostScriptName composes family + style (kept for _figmaAgent diagnostics)", () => {
     expect(fontPostScriptName("Inter", "Semi Bold")).toBe("Inter-SemiBold");
     expect(fontPostScriptName("Source Sans Pro", "Regular")).toBe("SourceSansPro-Regular");
   });
@@ -112,14 +113,60 @@ describe("TypeStyle building", () => {
   });
 
   it("lineHeight: PIXELS and AUTO map to REST units", () => {
-    expect(mapLineHeight({ unit: "PIXELS", value: 24 })).toEqual({ lineHeightPx: 24, lineHeightUnit: "PIXELS" });
+    expect(mapLineHeight({ unit: "PIXELS", value: 24 }, 16)).toEqual({
+      lineHeightPx: 24,
+      lineHeightUnit: "PIXELS",
+      lineHeightPercentFontSize: 150,
+    });
     expect(mapLineHeight({ unit: "AUTO" })).toEqual({ lineHeightUnit: "INTRINSIC_%", lineHeightPercent: 100 });
+    expect(mapLineHeight({ unit: "AUTO" }, undefined, 29.0454)).toEqual({
+      lineHeightUnit: "INTRINSIC_%",
+      lineHeightPercent: 100,
+      lineHeightPx: 29.0454,
+    });
     expect(mapLineHeight(undefined)).toEqual({});
   });
 
-  it("italic is emitted only when the style name says so", () => {
-    expect(buildTypeStyle({ fontFamily: "Inter", fontStyle: "Italic" }).italic).toBe(true);
-    expect(buildTypeStyle({ fontFamily: "Inter", fontStyle: "Semi Bold" }).italic).toBeUndefined();
+  it("fontPostScriptName is always present and null (measured REST rule); no italic field", () => {
+    const s = buildTypeStyle({ fontFamily: "Inter", fontStyle: "Italic" });
+    expect(s.fontPostScriptName).toBeNull();
+    expect(s.italic).toBeUndefined();
+  });
+
+  it("letterSpacing always emits (0 when unset); default-valued text props are omitted", () => {
+    const s = buildTypeStyle({
+      fontFamily: "Inter",
+      fontStyle: "Regular",
+      fontWeight: 400,
+      fontSize: 16,
+      textAlignHorizontal: "LEFT",
+      textAlignVertical: "TOP",
+    });
+    expect(s.letterSpacing).toBe(0);
+    expect(s.textCase).toBeUndefined();
+    expect(s.textDecoration).toBeUndefined();
+    expect(s.paragraphSpacing).toBeUndefined();
+    expect(s.fills).toBeUndefined();
+  });
+
+  it("fills ride along only in segment styles (override deltas), never the published style", () => {
+    const fills = [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] as unknown as Paint[];
+    const published = buildTypeStyle({ fontFamily: "Inter", fontSize: 12, fills });
+    expect(published.fills).toBeUndefined();
+    const segment = buildTypeStyle({ fontFamily: "Inter", fontSize: 12, fills, includeFills: true });
+    expect(Array.isArray(segment.fills)).toBe(true);
+  });
+});
+
+describe("constraints mapping", () => {
+  it("plugin MIN/MAX/STRETCH become REST LEFT/RIGHT/LEFT_RIGHT", () => {
+    expect(mapConstraints({ horizontal: "MIN", vertical: "MIN" })).toEqual({ horizontal: "LEFT", vertical: "TOP" });
+    expect(mapConstraints({ horizontal: "MAX", vertical: "MAX" })).toEqual({ horizontal: "RIGHT", vertical: "BOTTOM" });
+    expect(mapConstraints({ horizontal: "STRETCH", vertical: "STRETCH" })).toEqual({
+      horizontal: "LEFT_RIGHT",
+      vertical: "TOP_BOTTOM",
+    });
+    expect(mapConstraints({ horizontal: "CENTER", vertical: "SCALE" })).toEqual({ horizontal: "CENTER", vertical: "SCALE" });
   });
 });
 
@@ -159,7 +206,8 @@ describe("buildTextOverrides", () => {
     ]);
     expect(Object.keys(r.styleOverrideTable)).toHaveLength(1);
     expect(r.characterStyleOverrides).toEqual([0, 0, 0, 1, 1, 1, 1, 1, 1]);
-    expect(r.styleOverrideTable["1"]).toEqual({ fontWeight: 700 }); // delta only
+    // delta only — font identity travels as a group (measured REST rule)
+    expect(r.styleOverrideTable["1"]).toEqual({ fontFamily: "Inter", fontWeight: 700 });
   });
 
   it("5. segment end beyond characters.length is clamped, never out of bounds", () => {
@@ -194,12 +242,12 @@ describe("buildTextOverrides", () => {
     expect(r.characterStyleOverrides).toEqual([0, 0, 1]);
   });
 
-  it("8. table entries are DELTAS against the default style, not full styles", () => {
+  it("8. table entries are DELTAS against the default style, font keys grouped", () => {
     const r = buildTextOverrides("ab", [
       { start: 0, end: 1, style: style({}) },
       { start: 1, end: 2, style: style({ fontSize: 28, fontWeight: 700 }) },
     ]);
-    expect(r.styleOverrideTable["1"]).toEqual({ fontSize: 28, fontWeight: 700 });
-    expect(r.styleOverrideTable["1"].fontFamily).toBeUndefined();
+    // fontWeight differing pulls in the whole font-identity group
+    expect(r.styleOverrideTable["1"]).toEqual({ fontFamily: "Inter", fontSize: 28, fontWeight: 700 });
   });
 });
