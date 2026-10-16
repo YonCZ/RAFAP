@@ -40,10 +40,25 @@ export function normalize(value: unknown): unknown {
       out[k] = normalize((value as Record<string, unknown>)[k]);
     }
     if (Object.keys(out).length === 0) return undefined; // {} ≡ absent
+    padCharacterOverrides(out);
     canonicalizeOverrideTable(out);
     return out;
   }
   return value;
+}
+
+/**
+ * Re-pad characterStyleOverrides to the character count (REST trims
+ * trailing zeros; "characters beyond the array's length also use the
+ * default style" — i.e. index 0 — so padding with 0s is semantics-
+ * preserving). Array length then never diffs by itself.
+ */
+function padCharacterOverrides(node: Record<string, unknown>): void {
+  const chars = node.characters;
+  const cso = node.characterStyleOverrides;
+  if (typeof chars === "string" && Array.isArray(cso) && cso.length < chars.length) {
+    node.characterStyleOverrides = [...cso, ...new Array(chars.length - cso.length).fill(0)];
+  }
 }
 
 /** Renumber styleOverrideTable ids in first-appearance order. */
@@ -74,6 +89,14 @@ export function canonicalJson(value: unknown): string {
   const sorted = JSON.stringify(normalized, (_k, v) => v, 2);
   // JSON.stringify already emits insertion order; normalize() sorted keys
   return sorted;
+}
+
+/** Count scalar leaves — the denominator for byte-parity percentages. */
+export function countLeaves(value: unknown): number {
+  if (Array.isArray(value)) return value.reduce((sum, v) => sum + countLeaves(v), 0);
+  if (value && typeof value === "object")
+    return Object.values(value).reduce((sum, v) => sum + countLeaves(v), 0);
+  return 1;
 }
 
 // ---------------------------------------------------------------------------

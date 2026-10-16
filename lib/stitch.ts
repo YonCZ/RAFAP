@@ -100,18 +100,36 @@ export function buildFileEnvelope(
     backgroundColor: page.backgroundColor,
     prototypeStartNodeID: null,
     flowStartingPoints: [],
-    children: page.children
-      .filter((c) => !wanted || wanted.has(c.id))
-      .map((c) => {
-        const stored = byId.get(c.id);
-        if (stored) {
-          const doc = opts.depth ? pruneDepth(stored.document, opts.depth) : stored.document;
-          return { ...doc, children: (doc as { children?: unknown[] }).children ?? [] };
-        }
-        // not extracted yet — the stub (id/name/type/bounds) keeps the
-        // envelope structurally valid
-        return { ...c, children: [] };
-      }),
+    // REST requires prototypeDevice on canvases. The plugin cannot read
+    // prototype/device settings, so we emit the no-device default (the
+    // corpus's second page carries exactly this value) — documented
+    // deviation. prototypeBackgrounds is optional and omitted.
+    prototypeDevice: { type: "NONE", rotation: "NONE" },
+    scrollBehavior: "SCROLLS" as const,
+    children:
+      opts.depth !== undefined && opts.depth <= 1
+        ? // REST depth=1 returns pages only — canvases with no children.
+          []
+        : page.children
+            .filter((c) => !wanted || wanted.has(c.id))
+            .map((c) => {
+              const stored = byId.get(c.id);
+              if (stored) {
+                // REST counts depth from the DOCUMENT root: pages are
+                // depth 1, top-level objects depth 2, their children
+                // depth 3 (spec: /v1/files/{key} depth parameter).
+                // `stored.document` is already a depth-2 frame, so the
+                // levels below it are depth - 2.
+                const doc =
+                  opts.depth !== undefined
+                    ? pruneDepth(stored.document, Math.max(0, opts.depth - 2))
+                    : stored.document;
+                return { ...doc, children: (doc as { children?: unknown[] }).children ?? [] };
+              }
+              // not extracted yet — the stub (id/name/type/bounds) keeps the
+              // envelope structurally valid
+              return { ...c, children: [] };
+            }),
   }));
 
   return {
@@ -120,6 +138,7 @@ export function buildFileEnvelope(
     lastModified: extractedAt || new Date(0).toISOString(),
     editorType: "figma",
     version: `local-${pageIndex.fileKey}`,
+    linkAccess: "inherit",
     schemaVersion: 0,
     document: {
       id: "0:0",
@@ -141,21 +160,42 @@ export function buildFileEnvelope(
 /**
  * Build the `GET /v1/files/:key/nodes?ids=…` response body — each subtree
  * nested under `nodes[id].document` with its own component maps.
+ *
+ * The wrapper mirrors GetFileNodesResponse: `name`, `role`, `lastModified`,
+ * `editorType`, `thumbnailUrl`, `version`, `err` at the top level and NO
+ * `name` on entries (spec 0.44.0; spec-derived pending one measurement —
+ * see deviations doc).
  */
 export function buildNodesResponse(
   frames: StoredFrame[],
   opts: EnvelopeOptions = {},
+  meta?: { fileKey: string },
 ): Record<string, unknown> {
   const nodes: Record<string, unknown> = {};
   for (const f of frames) {
+    // depth on the nodes endpoint counts from the requested node itself
+    // (spec: "will be counted starting from the desired node") — so the
+    // plain pruneDepth call is already correct here.
     nodes[f.id] = {
-      document: opts.depth ? pruneDepth(f.document, opts.depth) : f.document,
+      document: opts.depth !== undefined ? pruneDepth(f.document, opts.depth) : f.document,
       components: f.components ?? {},
       componentSets: f.componentSets ?? {},
       schemaVersion: f.schemaVersion ?? 0,
       styles: f.styles ?? {},
-      name: f.name,
     };
   }
-  return { nodes, err: null };
+  const extractedAt = frames
+    .map((f) => (f._figmaAgent?.extractedAt as string | undefined) ?? "")
+    .sort()
+    .pop();
+  return {
+    name: "Figma Agent Local File",
+    role: "owner",
+    lastModified: extractedAt || new Date(0).toISOString(),
+    editorType: "figma",
+    thumbnailUrl: "", // no local thumbnail source — documented deviation
+    version: `local-${meta?.fileKey ?? "unknown"}`,
+    nodes,
+    err: null,
+  };
 }

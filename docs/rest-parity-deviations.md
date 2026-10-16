@@ -17,7 +17,7 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 2 | `lastModified` = max `_figmaAgent.extractedAt` of stored frames | No server; we timestamp at extraction time. |
 | 3 | `version` = `local-<fileKey>` | No server-side version hashes. |
 | 4 | `components`/`componentSets` maps keyed by node id, with `key` = node id, `documentationLinks: []`, `remote: false` | Publish keys don't exist for unpublished/local components. The shape matches; the key namespace is node ids. |
-| 5 | error responses are `{ status, error: true, message }` | Simplified from REST's i18n-shaped errors. Clients check `status`/`error`, which match. |
+| 5 | `/v1/*` error responses are `{ status, err }` — matching REST (empirically confirmed via a real 429). The legacy `/api/*` agent routes keep their own `{ error: "…" }` shapes. | Spec `ErrorResponsePayloadWithErrMessage`; measured from a live `{"err": "Rate limit exceeded", "status": 429}`. |
 | 6 | `/v1/files/:key/components` and `/styles` return best-effort maps from stored frames | REST's published-component endpoints hit team libraries we cannot see locally. |
 
 ## Per-node
@@ -66,3 +66,25 @@ Each per-node item notes the measured impact on the DevBoard reference file
 
 - `_figmaAgent.svgBase64` on shape nodes (REST cannot export SVG in file payloads).
 - `_figmaAgent.extractedAt` per frame (extraction timestamp).
+
+## Envelope & wrapper (Round 0)
+
+| # | Deviation | Rationale |
+|---|---|---|
+| 29 | Canvas `prototypeDevice` always `{ type: "NONE", rotation: "NONE" }` | The plugin cannot read prototype/device settings. The corpus's first page actually carries an iPhone preset — an honest 1-path residue. |
+| 30 | Canvas `prototypeBackgrounds` omitted | Unreadable from the plugin; optional per spec. |
+| 31 | `thumbnailUrl` = `""` on file/nodes responses; `img_url` = `""` on `/v1/me` | No local thumbnail/avatar source exists. |
+| 32 | `linkAccess` always `"inherit"` | No server-side access model; REST's default value. |
+| 33 | `/v1/files/:key/nodes` wrapper fields (`name`, `role`, `editorType`, `version`, `thumbnailUrl`, `err`) and the removal of entry-level `name` are **spec-derived** (0.44.0), pending one live measurement | The cached per-frame fixtures were extracted from the whole-file snapshot, not real `/nodes` responses; a rate-limited attempt (429) prevented verification. One API call settles it when the window resets. |
+| 34 | `?depth=N` on `/v1/files/:key` counts from the DOCUMENT root (pages = 1, top-level objects = 2); depth ≤ 1 returns pages only | Matches the OpenAPI `depth` parameter semantics (fixed an off-by-two). The `/nodes` endpoint counts from the requested node — as before. |
+
+## Normalization policy (harness)
+
+| # | Deviation | Rationale |
+|---|---|---|
+| 35 | The golden-diff normalizer strips `componentPropertyDefinitions` | Volatile across publish cycles; component-property parity is therefore **not asserted** by "identical" verdicts. |
+| 36 | `characterStyleOverrides` arrays are re-padded to the character count with 0s before diffing | REST trims trailing zeros; "characters beyond the array's length use the default style", so padding is semantics-preserving and array length never diffs by itself. |
+
+## Closed questions (experiments recorded)
+
+- **`layoutVersion` (deviation #7) is genuinely edit-history.** Corpus mine (`tools/rule-learn.ts layoutVersion`, 492 nodes): 440×5, 51×3, 1×4. The 3s cluster in 4 frames on page 2 — but those same frames also carry 5s, and the value is TEXT-only there while other TEXTs are 5. No type/frame/depth rule reaches the ≥99% bar (best: constant 5 at 89.4%). Not emitted; documented as fundamental.

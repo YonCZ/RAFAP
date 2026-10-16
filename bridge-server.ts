@@ -344,7 +344,10 @@ app.use((req, res, next) => {
 });
 
 function restError(res: express.Response, status: number, message: string): void {
-  res.status(status).json({ status, error: true, message });
+  // REST error shape: {status, err} (spec ErrorResponsePayloadWithErrMessage;
+  // empirically confirmed by a real 429 from api.figma.com). The legacy
+  // /api/* routes keep their own {error: "..."} shapes.
+  res.status(status).json({ status, err: message });
 }
 
 // --- plugin/agent command endpoints ---------------------------------------
@@ -485,7 +488,13 @@ app.get("/api/page-index", (_req, res) => {
 // ---------------------------------------------------------------------------
 
 app.get("/v1/me", (_req, res) => {
-  res.json({ id: "figma-agent-local", handle: "figma-agent", email: "local@figma-agent" });
+  // GetMeResponse = User & {email}; User requires id, handle, img_url.
+  res.json({
+    id: "figma-agent-local",
+    handle: "figma-agent",
+    img_url: "", // no local avatar source — documented deviation
+    email: "local@figma-agent",
+  });
 });
 
 app.get("/v1/files/:key", async (req, res) => {
@@ -538,7 +547,10 @@ app.get("/v1/files/:key/nodes", async (req, res) => {
       }
       frames.push(frame);
     }
-    res.json(buildNodesResponse(frames, { depth }));
+    const pages = getPages(key);
+    res.json(
+      buildNodesResponse(frames, { depth }, pages ? { fileKey: pages.fileKey } : undefined),
+    );
   } catch (e) {
     if (e instanceof BridgeError) {
       restError(res, e.status, e.message);

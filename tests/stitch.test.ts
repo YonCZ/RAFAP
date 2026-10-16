@@ -73,11 +73,53 @@ describe("buildFileEnvelope", () => {
 });
 
 describe("buildNodesResponse", () => {
-  it("nests each tree under nodes[id].document with err: null (the asymmetry!)", () => {
-    const res = buildNodesResponse([frame("1:1", "A")]);
+  it("nests each tree under nodes[id].document with the GetFileNodesResponse wrapper", () => {
+    const res = buildNodesResponse([frame("1:1", "A")], {}, { fileKey: "local-x" });
     expect(res.err).toBeNull();
+    expect(res.role).toBe("owner");
+    expect(res.editorType).toBe("figma");
+    expect(res.thumbnailUrl).toBe("");
+    expect(res.version).toBe("local-local-x");
     expect((res.nodes as any)["1:1"].document.id).toBe("1:1");
     expect((res.nodes as any)["1:1"].components["c:1"].name).toBe("Button");
-    expect((res.nodes as any)["1:1"].name).toBe("A");
+    // entries carry NO name (spec 0.44.0 — GetFileNodesResponse)
+    expect((res.nodes as any)["1:1"].name).toBeUndefined();
+  });
+});
+
+describe("buildFileEnvelope depth (REST counts from the DOCUMENT root)", () => {
+  const pages = { fileKey: "KEY", pages: [page("0:1", { id: "1:1", name: "A" })] };
+  const frames = [frame("1:1", "A")];
+
+  it("depth=1 returns pages only — canvases with no children", () => {
+    const env = buildFileEnvelope(pages, frames, { depth: 1 });
+    const canvas = (env.document as any).children[0];
+    expect(canvas.children).toEqual([]);
+  });
+
+  it("depth=2 returns top-level objects — frames with no children", () => {
+    const env = buildFileEnvelope(pages, frames, { depth: 2 });
+    const canvas = (env.document as any).children[0];
+    expect(canvas.children.map((c: any) => c.id)).toEqual(["1:1"]);
+    expect(canvas.children[0].children).toEqual([]);
+  });
+
+  it("depth=3 returns one level below top-level objects", () => {
+    const env = buildFileEnvelope(pages, frames, { depth: 3 });
+    const top = (env.document as any).children[0].children[0];
+    expect(top.children.map((c: any) => c.id)).toEqual(["1:1.1"]);
+  });
+
+  it("no depth returns the full tree", () => {
+    const env = buildFileEnvelope(pages, frames, {});
+    const top = (env.document as any).children[0].children[0];
+    expect(top.children.length).toBe(1);
+  });
+
+  it("canvases carry prototypeDevice and scrollBehavior", () => {
+    const env = buildFileEnvelope(pages, frames, {});
+    const canvas = (env.document as any).children[0];
+    expect(canvas.prototypeDevice).toEqual({ type: "NONE", rotation: "NONE" });
+    expect(canvas.scrollBehavior).toBe("SCROLLS");
   });
 });
