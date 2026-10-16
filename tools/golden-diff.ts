@@ -135,6 +135,8 @@ function classify(diff: TreeDiff): string {
 export function classifyRootCause(d: TreeDiff): string {
   const p = d.path;
   const leaf = p.split(".").pop() ?? "";
+  // leaf base without array index — `overrides[0]` reports as `overrides`
+  const leafBase = leaf.replace(/\[\d+\]$/, "");
   // canvas-level fields (file mode) — structural / by-design deviations
   if (leaf === "prototypeDevice" || leaf === "prototypeBackgrounds") return "envelope (structural)";
   // G1: cross-file (library) data — style bindings & maps, library transitions
@@ -159,7 +161,7 @@ export function classifyRootCause(d: TreeDiff): string {
   )
     return "G3 server history";
   // G5: instance override tables
-  if (leaf === "overrides" || leaf === "fillOverrideTable" || p.includes(".constraints")) return "G5 instance tables";
+  if (leafBase === "overrides" || leafBase === "fillOverrideTable" || leafBase === "overriddenFields" || p.includes(".constraints")) return "G5 instance tables";
   // envelope-level fields (file mode): the whole-file wrapper — by-design
   if (/^\$\.(name|role|editorType|thumbnailUrl|version|lastModified|linkAccess|schemaVersion|components|componentSets)(\.|$)/.test(p))
     return "envelope (structural)";

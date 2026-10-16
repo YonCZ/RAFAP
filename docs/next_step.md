@@ -176,6 +176,47 @@ Design: probes are small registered functions (`layoutVersion`, `baseStyleRule`,
 
 ## Round 1 — G5: instance overrides (302 paths — the biggest solvable gap)
 
+> **STATUS: ✅ completed 2026-10-16.** B1, B3, and the components-map fix
+> landed; B2 closed as underivable. `npm run check` green, 55/55 tests.
+> **Scorecard: 2,335 paths / 97.692% byte parity** (from 2,367 / 97.498%;
+> G5: 302 → 257). Measured outcomes:
+> - **B1 `overrides` emitted on every instance** (self first, descendants
+>   in document order, `overriddenFields` alphabetically sorted — all
+>   corpus-measured). Entry arrays match REST **99% for local-main
+>   instances (96/97) and 100% for empty ones (77/77)**.
+> - **The remote-main ceiling (deviation #37):** REST `overrides` are
+>   *stored user-edit records*, not live diffs. Library drift after
+>   insertion (renamed mains, edited subtrees, absorbed overrides) is
+>   invisible to the plugin API — remote-main arrays match only 1/49.
+>   This is a semantic limit, not a detector bug: the plugin exposes no
+>   override records.
+> - **Auto-scale rule (measured):** descendants that only scaled with
+>   their owning instance's resize (ratio within 1e-3) are not overrides
+>   — verified on 248:593 (child 24×13.33 vs main 18×10 at 32/24).
+>   A descendant's cascade factor is its *nearest* instance ancestor's
+>   doc/main ratio (that ratio already composes outer scales).
+> - **B3 landed:** instance children inherit `constraints` and style
+>   bindings from their main correspondent when they report none.
+> - **Transitions:** legacy `transition*` props are gone from the plugin
+>   API — detected via modern `reactions` diff, firing the legacy
+>   field group. The one corpus case still misses (stored record, live
+>   reactions now equal — drift bucket of #37).
+> - **B2 `fillOverrideTable` closed as underivable (deviation #38):**
+>   all 130 corpus values are `{"1": null}` (5 have 3 slots); presence
+>   is uncorrelated with `vectorNetwork` regions (53 with-table report
+>   0 regions, 21 without-table report 1), segments, fills, or strokes.
+>   No rule clears the 99% bar (same discipline as `layoutVersion`/F1).
+> - **Components map fixed:** real 40-hex publish keys (`comp.key`),
+>   `remote` always on components / only `true` on sets,
+>   `documentationLinks` on every file-level component (remote included,
+>   `[]` when none — re-measured on the v2 file fixture, correcting the
+>   Round 0 note). File-mode components/componentSets diffs: **0**.
+> - Tooling: `tools/restart-plugin.sh` verification fixed (the old check
+>   passed with the plugin closed — POST queueing returns 200 instantly);
+>   now single-click-run when closed, close/reopen only when reloading.
+>   Dev probe: `/api/dev/probe` (node facts, vectorNetwork, instance+main
+>   subtree dumps).
+
 Spec anchors: `.spec/api_types.ts` → `Overrides = { id: string; overriddenFields: string[] }`; `InstanceNode` — `overrides` is in the **required** list alongside `type` and `componentId`; `HasGeometryTrait.fillOverrideTable?: { [key: string]: PaintOverride | null }`; `PaintOverride = { fills?: Paint[]; inheritFillStyleId?: string }`.
 
 ### B1. `overrides` arrays (146 paths)

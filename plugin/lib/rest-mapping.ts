@@ -350,6 +350,218 @@ export function buildTypeStyle(s: StyleSource): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Instance-child ↔ main-component correspondence (Round 1 — overrides)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip the owning-instance prefix from an instance descendant's id.
+ *
+ * Document ids of instance descendants are `I<topInstanceId>;<rel>` where
+ * <rel> is the node's id within the main component's subtree. Segments
+ * chain ONLY through nested instances (plain levels add nothing), and a
+ * nested instance's own descendants prefix with the nested instance's full
+ * id — so try the `I`-prefixed form first, then the bare form (measured
+ * from the REST corpus).
+ */
+export function mainRelativeId(instanceId: string, nodeId: string): string | null {
+  const withI = `I${instanceId};`;
+  if (nodeId.startsWith(withI)) return nodeId.slice(withI.length);
+  const bare = `${instanceId};`;
+  if (nodeId.startsWith(bare)) return nodeId.slice(bare.length);
+  return null;
+}
+
+/**
+ * Normalize a plugin-reported id from INSIDE a main component's subtree to
+ * the flat main-relative form. Children of nested instances carry an inner
+ * `I` when walked from the main (`I6:1803;267:5340`) which document-space
+ * ids do not (`6:1803;267:5340`).
+ */
+export function flatMainKey(walkedId: string): string {
+  return walkedId.replace(/^I/, "").replace(/;I/g, ";");
+}
+
+/** Normalize a *StyleId value for comparison: "S:…" kept, ""/mixed → "". */
+export function styleIdValue(v: unknown): string {
+  return typeof v === "string" && v ? v : "";
+}
+
+/** Paint arrays equal? — raw JSON compare; mixed sentinels equal only to themselves. */
+export function paintsEqual(a: unknown, b: unknown): boolean {
+  if (typeof a === "symbol" || typeof b === "symbol") return a === b;
+  if (Array.isArray(a) && Array.isArray(b)) return JSON.stringify(a) === JSON.stringify(b);
+  return a === b;
+}
+
+const RADIUS_KEYS = ["topLeftRadius", "topRightRadius", "bottomLeftRadius", "bottomRightRadius"] as const;
+const PADDING_KEYS = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const;
+
+const layoutModeActive = (n: Record<string, unknown>): boolean => {
+  const m = n.layoutMode;
+  return typeof m === "string" && m !== "NONE";
+};
+
+/**
+ * Does a size difference exactly match the owning instance's resize ratio?
+ * A descendant that only scaled with its parent's resize is NOT a stored
+ * override (measured: 248:593 resized 32/24; its child 24×13.33 vs main
+ * 18×10 carries the same 1.3333× ratio — REST lists no override for it).
+ */
+function scaleExplains(cv: unknown, mv: unknown, s: number): boolean {
+  if (typeof cv !== "number" || typeof mv !== "number" || mv === 0) return false;
+  return Math.abs(cv / mv - s) <= 1e-3;
+}
+
+/**
+ * Detect which REST `overriddenFields` differ between an instance-side
+ * node and its main-component correspondent. Both arguments are live
+ * plugin nodes (duck-typed; pure function otherwise).
+ *
+ * `scale` — the resize ratio of the node's nearest enclosing instance
+ * (doc dims ÷ its main's dims). Descendant size diffs explained by that
+ * ratio are inherited scaling, not overrides, and are suppressed.
+ *
+ * The vocabulary is corpus-measured (see report/next_step Round 1):
+ * inheritFillStyleId, height, width, name, strokes, fills,
+ * targetAspectRatio, clipsContent, primaryAxisSizingMode, corner radii,
+ * paddings, transitions, the text-style family, and `text` for characters.
+ */
+export function detectOverrideFields(
+  c: Record<string, unknown>,
+  m: Record<string, unknown>,
+  scale?: { x: number; y: number },
+): string[] {
+  const f: string[] = [];
+  const isText = c.type === "TEXT" && m.type === "TEXT";
+
+  if (c.name !== m.name) f.push("name");
+  if (c.width !== m.width && !(scale && scaleExplains(c.width, m.width, scale.x))) f.push("width");
+  if (c.height !== m.height && !(scale && scaleExplains(c.height, m.height, scale.y))) f.push("height");
+  if (!isText && !paintsEqual(c.fills, m.fills)) f.push("fills");
+  if (!paintsEqual(c.strokes, m.strokes)) f.push("strokes");
+  if (styleIdValue(c.fillStyleId) !== styleIdValue(m.fillStyleId)) f.push("inheritFillStyleId");
+  if (styleIdValue(c.textStyleId) !== styleIdValue(m.textStyleId)) f.push("inheritTextStyleId");
+
+  // corner radii — uniform cornerRadius on frames, per-corner on rectangles
+  if (
+    typeof c.cornerRadius === "number" &&
+    typeof m.cornerRadius === "number" &&
+    c.cornerRadius !== m.cornerRadius
+  ) {
+    f.push("cornerRadius");
+  }
+  for (const p of RADIUS_KEYS) {
+    if (typeof c[p] === "number" && typeof m[p] === "number" && c[p] !== m[p]) f.push(p);
+  }
+
+  if (
+    typeof c.clipsContent === "boolean" &&
+    typeof m.clipsContent === "boolean" &&
+    c.clipsContent !== m.clipsContent
+  ) {
+    f.push("clipsContent");
+  }
+  if (JSON.stringify(c.targetAspectRatio ?? null) !== JSON.stringify(m.targetAspectRatio ?? null)) {
+    f.push("targetAspectRatio");
+  }
+
+  // auto-layout container overrides — only meaningful when both lay out
+  if (layoutModeActive(c) && layoutModeActive(m)) {
+    if (c.primaryAxisSizingMode !== m.primaryAxisSizingMode) f.push("primaryAxisSizingMode");
+    if (c.counterAxisSizingMode !== m.counterAxisSizingMode) f.push("counterAxisSizingMode");
+    if (c.primaryAxisAlignItems !== m.primaryAxisAlignItems) f.push("primaryAxisAlignItems");
+    if (c.counterAxisAlignItems !== m.counterAxisAlignItems) f.push("counterAxisAlignItems");
+    for (const p of PADDING_KEYS) {
+      if (typeof c[p] === "number" && typeof m[p] === "number" && c[p] !== m[p]) f.push(p);
+    }
+    if (
+      typeof c.itemSpacing === "number" &&
+      typeof m.itemSpacing === "number" &&
+      c.itemSpacing !== m.itemSpacing
+    ) {
+      f.push("itemSpacing");
+    }
+  }
+
+  // prototype transition overrides. The legacy transition* properties are
+  // gone from the plugin API — compare the modern `reactions` instead and
+  // fire REST's legacy field group when they differ (measured: 180:335,
+  // an instance with an added tap-navigate reaction, lists
+  // transitionDuration/Easing/NodeID).
+  if (
+    JSON.stringify(c.reactions ?? null) !== JSON.stringify(m.reactions ?? null) ||
+    c.transitionDuration !== m.transitionDuration ||
+    c.transitionEasing !== m.transitionEasing ||
+    c.transitionNodeID !== m.transitionNodeID
+  ) {
+    f.push("transitionDuration", "transitionEasing", "transitionNodeID");
+  }
+
+  // TEXT — characters + per-field style deltas (via styled segments)
+  if (isText) {
+    if (c.characters !== m.characters) f.push("text");
+    f.push(...textStyleDiff(c as any, m as any));
+  }
+  // REST emits overriddenFields in alphabetical order (measured).
+  return [...new Set(f)].sort();
+}
+
+/**
+ * Text-style override fields. Compares the set of per-segment styled values
+ * (so boundary shifts don't false-fire) and emits REST field names; font
+ * identity travels as a group (fontFamily + fontPostScriptName + fontSize +
+ * fontWeight) mirroring the FONT_KEYS rule in styleDelta.
+ */
+function textStyleDiff(c: any, m: any): string[] {
+  const FIELDS = ["fontName", "fontSize", "fontWeight", "letterSpacing", "lineHeight", "fills"] as const;
+  const collect = (t: any): Record<string, string> => {
+    const summary: Record<string, string> = {};
+    try {
+      const segs = t.getStyledTextSegments([
+        "fontName",
+        "fontSize",
+        "fontWeight",
+        "letterSpacing",
+        "lineHeight",
+        "fills",
+      ]) as any[];
+      for (const field of FIELDS) {
+        summary[field] = JSON.stringify(
+          [...new Set(segs.map((s) => JSON.stringify(s[field] ?? null)))].sort(),
+        );
+      }
+    } catch {
+      /* fonts unavailable — no comparable summary */
+    }
+    return summary;
+  };
+  const cs = collect(c);
+  const ms = collect(m);
+  if (!Object.keys(cs).length || !Object.keys(ms).length) return [];
+
+  const out: string[] = [];
+  const differs = (k: string) => cs[k] !== undefined && ms[k] !== undefined && cs[k] !== ms[k];
+  const fontChanged = differs("fontName") || differs("fontSize") || differs("fontWeight");
+  if (fontChanged) out.push("fontFamily", "fontPostScriptName", "fontSize", "fontWeight");
+  // italic flips with the font style name (plugin encodes it in fontStyle)
+  const italic = (t: any): string => {
+    try {
+      const segs = t.getStyledTextSegments(["fontName"]) as any[];
+      return JSON.stringify([...new Set(segs.map((s) => String(s.fontName?.style ?? "").includes("Italic")))]);
+    } catch {
+      return "";
+    }
+  };
+  if (italic(c) !== italic(m) && fontChanged) out.push("italic");
+  if (differs("letterSpacing")) out.push("letterSpacing");
+  if (differs("lineHeight")) {
+    out.push("lineHeightPx", "lineHeightPercent", "lineHeightPercentFontSize", "lineHeightUnit");
+  }
+  if (differs("fills")) out.push("fills");
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // characterStyleOverrides + styleOverrideTable (the hard one)
 // ---------------------------------------------------------------------------
 

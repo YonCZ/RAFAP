@@ -7,7 +7,10 @@ import {
   buildTextOverrides,
   buildTypeStyle,
   deepEqual,
+  detectOverrideFields,
+  flatMainKey,
   fontPostScriptName,
+  mainRelativeId,
   mapConstraints,
   mapEffects,
   mapLetterSpacing,
@@ -249,5 +252,119 @@ describe("buildTextOverrides", () => {
     ]);
     // fontWeight differing pulls in the whole font-identity group
     expect(r.styleOverrideTable["1"]).toEqual({ fontFamily: "Inter", fontSize: 28, fontWeight: 700 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round 1 — instance-child ↔ main correspondence + override detection
+// ---------------------------------------------------------------------------
+
+describe("mainRelativeId", () => {
+  it("strips the top-instance prefix", () => {
+    expect(mainRelativeId("147:350", "I147:350;66:419")).toBe("66:419");
+  });
+  it("resolves nested-instance descendants via the nested instance's full id", () => {
+    expect(mainRelativeId("I180:321;6:1803", "I180:321;6:1803;267:5340")).toBe("267:5340");
+  });
+  it("resolves the same node via the TOP instance with the full flat path", () => {
+    expect(mainRelativeId("180:321", "I180:321;6:1803;267:5340")).toBe("6:1803;267:5340");
+  });
+  it("returns null for non-descendants and the instance itself", () => {
+    expect(mainRelativeId("180:321", "180:321")).toBeNull();
+    expect(mainRelativeId("180:321", "I999:1;5:2")).toBeNull();
+    expect(mainRelativeId("180:321", "5:2")).toBeNull();
+  });
+});
+
+describe("flatMainKey", () => {
+  it("passes plain ids through", () => {
+    expect(flatMainKey("5:2")).toBe("5:2");
+    expect(flatMainKey("6:1803")).toBe("6:1803");
+  });
+  it("strips the inner I of nested-instance children walked from the main", () => {
+    expect(flatMainKey("I6:1803;267:5340")).toBe("6:1803;267:5340");
+    expect(flatMainKey("I6:1803;I7:2;5:9")).toBe("6:1803;7:2;5:9");
+  });
+});
+
+describe("detectOverrideFields", () => {
+  const base = { type: "FRAME", name: "Card", width: 100, height: 50, fills: [], strokes: [] };
+  it("fires nothing when identical", () => {
+    expect(detectOverrideFields(base, { ...base })).toEqual([]);
+  });
+  it("detects name and size separately", () => {
+    expect(detectOverrideFields({ ...base, name: "Renamed" }, base)).toEqual(["name"]);
+    expect(detectOverrideFields({ ...base, width: 120 }, base)).toEqual(["width"]);
+    expect(detectOverrideFields({ ...base, height: 80 }, base)).toEqual(["height"]);
+  });
+  it("detects fills/strokes by raw JSON and style ids via styleIdValue", () => {
+    expect(detectOverrideFields({ ...base, fills: [{ type: "SOLID" }] }, base)).toEqual(["fills"]);
+    expect(detectOverrideFields({ ...base, strokes: [{ type: "SOLID" }] }, base)).toEqual(["strokes"]);
+    expect(detectOverrideFields({ ...base, fillStyleId: "S:abc,1:2" }, base)).toEqual([
+      "inheritFillStyleId",
+    ]);
+    // "" (unbound) and undefined are equal — no false fire
+    expect(detectOverrideFields({ ...base, fillStyleId: "" }, { ...base })).toEqual([]);
+  });
+  it("corner radii fire per-corner and uniform (both sides must expose the prop)", () => {
+    const radii = { topLeftRadius: 0, topRightRadius: 0, bottomLeftRadius: 0, bottomRightRadius: 0 };
+    expect(detectOverrideFields({ ...base, ...radii, cornerRadius: 8 }, { ...base, ...radii, cornerRadius: 0 })).toEqual(["cornerRadius"]);
+    expect(detectOverrideFields({ ...base, ...radii, topLeftRadius: 4 }, { ...base, ...radii })).toEqual(["topLeftRadius"]);
+    // VECTOR mains expose no cornerRadius — nothing to compare, no false fire
+    expect(detectOverrideFields({ ...base, cornerRadius: 8 }, base)).toEqual([]);
+  });
+  it("auto-layout overrides only compared when both lay out", () => {
+    const al = { ...base, layoutMode: "VERTICAL", primaryAxisSizingMode: "FIXED" };
+    expect(detectOverrideFields({ ...al, primaryAxisSizingMode: "AUTO" }, al)).toEqual([
+      "primaryAxisSizingMode",
+    ]);
+    expect(detectOverrideFields({ ...base, primaryAxisSizingMode: "AUTO" }, base)).toEqual([]);
+  });
+  it("auto-scale cascade: size diffs matching the owning instance's ratio are suppressed", () => {
+    const mainChild = { ...base, width: 18, height: 10 };
+    const scaledChild = { ...base, width: 24, height: 13.333333015441895 }; // 1.3333× of main
+    const scale = { x: 32 / 24, y: 32 / 24 }; // the owning instance's resize ratio
+    expect(detectOverrideFields(scaledChild, mainChild, scale)).toEqual([]);
+    // a real override on top of the cascade still fires
+    expect(detectOverrideFields({ ...scaledChild, width: 30 }, mainChild, scale)).toEqual(["width"]);
+    // without scale context the diff fires (conservative)
+    expect(detectOverrideFields(scaledChild, mainChild)).toEqual(["height", "width"]);
+  });
+
+  it("reactions: differing prototype reactions fire REST's legacy transition group", () => {
+    const nav = [{ action: { type: "NODE", destinationId: "7:1" }, trigger: { type: "ON_CLICK" } }];
+    const c = { ...base, reactions: nav };
+    const m = { ...base, reactions: [] };
+    expect(detectOverrideFields(c, m)).toEqual(["transitionDuration", "transitionEasing", "transitionNodeID"]);
+    expect(detectOverrideFields({ ...base, reactions: [] }, { ...base, reactions: [] })).toEqual([]);
+  });
+
+  it("TEXT: characters fire as 'text' and font changes fire as a group", () => {
+    const segs = (fontName: string, size: number, weight: number) => () => [
+      { fontName: { family: "Inter", style: fontName }, fontSize: size, fontWeight: weight },
+    ];
+    const c = {
+      type: "TEXT",
+      characters: "Hello",
+      getStyledTextSegments: segs("Semi Bold", 16, 600),
+    };
+    const m = {
+      type: "TEXT",
+      characters: "Hello",
+      getStyledTextSegments: segs("Regular", 16, 400),
+    };
+    expect(detectOverrideFields(c, m)).toEqual([
+      "fontFamily",
+      "fontPostScriptName",
+      "fontSize",
+      "fontWeight",
+    ]);
+    expect(detectOverrideFields({ ...c, characters: "Hi" }, m)).toEqual([
+      "fontFamily",
+      "fontPostScriptName",
+      "fontSize",
+      "fontWeight",
+      "text",
+    ]);
   });
 });

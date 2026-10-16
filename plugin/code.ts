@@ -21,11 +21,15 @@ import {
   MIXED,
   buildTextOverrides,
   buildTypeStyle,
+  detectOverrideFields,
+  flatMainKey,
+  mainRelativeId,
   mapColor,
   mapConstraints,
   mapEffects,
   mapPaints,
   omitEmpty,
+  styleIdValue,
   type SegmentInput,
   type StyleSource,
 } from "./lib/rest-mapping";
@@ -104,6 +108,88 @@ figma.ui.onmessage = async (msg: any) => {
         for (const node of sel) payload.push(await extractFramePayload(node));
       } else if (commandType === "export") {
         payload = await exportNodes(params.ids, params.format, params.scale);
+      } else if (commandType === "probe") {
+        // Round 1 dev tool — raw node facts for corpus-rule fitting
+        // (vectorNetwork regions, constraints, style ids, dimensions), or a
+        // full instance-vs-main subtree dump for override-correspondence
+        // analysis when `instanceId` is given.
+        if (params.instanceId) {
+          const inst: any = await figma.getNodeByIdAsync(params.instanceId);
+          if (!inst || inst.type !== "INSTANCE") {
+            throw new Error(`not an instance: ${params.instanceId}`);
+          }
+          const main: any = await inst.getMainComponentAsync();
+          const dump = (root: any): any[] => {
+            const out: any[] = [];
+            const stack: any[] = [root];
+            while (stack.length) {
+              const cur = stack.pop()!;
+              out.push({
+                id: cur.id,
+                type: cur.type,
+                name: cur.name,
+                width: cur.width,
+                height: cur.height,
+                fillStyleId: cur.fillStyleId ?? null,
+                strokeStyleId: cur.strokeStyleId ?? null,
+                textStyleId: cur.textStyleId ?? null,
+                visible: cur.visible,
+                characters: cur.characters ?? undefined,
+              });
+              const kc = cur.children ?? [];
+              for (let i = kc.length - 1; i >= 0; i--) stack.push(kc[i]);
+            }
+            return out;
+          };
+          payload = {
+            instance: {
+              id: inst.id,
+              subtree: dump(inst),
+            },
+            main: main
+              ? { id: main.id, name: main.name, remote: !!main.remote, subtree: dump(main) }
+              : null,
+          };
+        } else {
+          const probes: any[] = [];
+          for (const id of (params.ids ?? []) as string[]) {
+            try {
+              const node: any = await figma.getNodeByIdAsync(id);
+              if (!node) {
+                probes.push({ id, error: "not found" });
+                continue;
+              }
+              const rec: any = {
+                id,
+                type: node.type,
+                name: node.name,
+                width: node.width,
+                height: node.height,
+                constraints: typeof node.constraints === "symbol" ? "MIXED" : node.constraints ?? null,
+                fillStyleId: node.fillStyleId ?? null,
+                textStyleId: node.textStyleId ?? null,
+                characters: node.characters ?? null,
+              };
+              if (node.type === "VECTOR") {
+                try {
+                  const vn = node.vectorNetwork;
+                  rec.vectorRegions = vn?.regions?.length ?? 0;
+                  rec.vectorRegionFillCounts = (vn?.regions ?? []).map(
+                    (r: any) => r?.fills?.length ?? 0,
+                  );
+                  rec.vectorSegments = vn?.segments?.length ?? 0;
+                  rec.vectorVertices = vn?.vertices?.length ?? 0;
+                } catch {
+                  rec.vectorRegions = "unavailable";
+                }
+              }
+              probes.push(rec);
+            } catch (e) {
+              probes.push({ id, error: (e as Error).message });
+            }
+          }
+          payload = { probes };
+        }
       } else {
         throw new Error(`unknown command type: ${commandType}`);
       }
@@ -117,6 +203,119 @@ figma.ui.onmessage = async (msg: any) => {
 // ---------------------------------------------------------------------------
 // Page index (all pages — used by the bridge to stitch /v1/files envelopes)
 // ---------------------------------------------------------------------------
+
+/** Mutable per-extraction state shared by serializeNode (Round 1). */
+interface ExtractContext {
+  components: Record<string, unknown>;
+  componentSets: Record<string, unknown>;
+  styles: Record<string, unknown>;
+  /** main-component subtree indexes, keyed by main component id (shared per component). */
+  mainIndexes: Map<string, Map<string, any>>;
+  /** resolved main components, keyed by the owning instance's node id. */
+  instanceMains: Map<string, ComponentNode>;
+}
+
+/**
+ * Walk a main component's subtree and index every node by its flat
+ * main-relative id (nested-instance children carry an inner `I` when walked
+ * from the main — flatMainKey strips it so document-space `I<inst>;<rel>`
+ * ids resolve).
+ */
+function buildMainIndex(main: ComponentNode): Map<string, any> {
+  const index = new Map<string, any>();
+  const stack: any[] = [main];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    if (typeof cur.id === "string") {
+      const flat = flatMainKey(cur.id);
+      if (!index.has(flat)) index.set(flat, cur);
+      if (!index.has(cur.id)) index.set(cur.id, cur);
+    }
+    if ("children" in cur && Array.isArray((cur as any).children)) {
+      const kids = (cur as any).children as readonly any[];
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+  }
+  return index;
+}
+
+/**
+ * The main-component correspondent of an instance descendant, or null.
+ * Document ids of descendants start with `I<outermostInstanceId>;` — the
+ * outermost instance's main index covers the whole subtree (flat keys reach
+ * through nested instances).
+ */
+function mainCorrespondent(nodeId: string, ctx: ExtractContext): any | null {
+  const m = /^I([^;]+);(.+)$/.exec(nodeId);
+  if (!m) return null;
+  const main = ctx.instanceMains.get(m[1]);
+  if (!main) return null;
+  const index = ctx.mainIndexes.get(main.id);
+  if (!index) return null;
+  return index.get(flatMainKey(m[2])) ?? index.get(m[2]) ?? null;
+}
+
+/**
+ * The resize ratio of a node's NEAREST instance ancestor (doc dims ÷ that
+ * instance's main dims). This single ratio already composes every outer
+ * scale — a nested instance's doc/main ratio includes its parent's resize
+ * — so descendant size diffs explained by it are inherited scaling, not
+ * stored overrides (Round 1, measured).
+ */
+function inheritedScale(node: any, ctx: ExtractContext): { x: number; y: number } | undefined {
+  let p = node.parent;
+  while (p) {
+    if (p.type === "INSTANCE") {
+      const main = ctx.instanceMains.get(p.id);
+      if (main && main.width > 0 && main.height > 0) {
+        return { x: p.width / main.width, y: p.height / main.height };
+      }
+      return undefined;
+    }
+    p = p.parent;
+  }
+  return undefined;
+}
+
+/**
+ * Emit every INSTANCE's `overrides` array (Round 1 — B1). REST emits
+ * `overrides` on every instance (`[]` when nothing differs); entries are
+ * `{id, overriddenFields}`, self first, then descendants in document order
+ * (measured). Inherited overrides (a nested instance's own array) are NOT
+ * included — each instance reports only its direct edits.
+ */
+function attachInstanceOverrides(
+  objByNode: Map<BaseNode, Record<string, unknown>>,
+  ctx: ExtractContext,
+): void {
+  for (const [node, obj] of objByNode) {
+    if (node.type !== "INSTANCE") continue;
+    const overrides: { id: string; overriddenFields: string[] }[] = [];
+    const main = ctx.instanceMains.get(node.id);
+    if (main) {
+      const index = ctx.mainIndexes.get(main.id)!;
+      const selfFields = detectOverrideFields(node as any, main as any, inheritedScale(node, ctx));
+      if (selfFields.length) overrides.push({ id: node.id, overriddenFields: selfFields });
+
+      // descendants in document (pre-)order — iterative, depth-safe
+      const stack: any[] = [...((node as any).children ?? [])].reverse();
+      while (stack.length) {
+        const kid = stack.pop()!;
+        const rel = mainRelativeId(node.id, kid.id);
+        if (rel !== null) {
+          const mc = index.get(flatMainKey(rel)) ?? index.get(rel);
+          if (mc) {
+            const fields = detectOverrideFields(kid, mc, inheritedScale(kid, ctx));
+            if (fields.length) overrides.push({ id: kid.id, overriddenFields: fields });
+          }
+        }
+        const kc = kid.children ?? [];
+        for (let i = kc.length - 1; i >= 0; i--) stack.push(kc[i]);
+      }
+    }
+    obj.overrides = overrides;
+  }
+}
 
 /**
  * Real file keys require `enablePrivatePluginApi` (private org plugins
@@ -229,9 +428,14 @@ async function enumerateLocalStyles(styles: Record<string, unknown>): Promise<vo
 }
 
 async function extractTree(root: SceneNode): Promise<ExtractionResult> {
-  const components: Record<string, unknown> = {};
-  const componentSets: Record<string, unknown> = {};
-  const styles: Record<string, unknown> = {};
+  const ctx: ExtractContext = {
+    components: {},
+    componentSets: {},
+    styles: {},
+    mainIndexes: new Map(),
+    instanceMains: new Map(),
+  };
+  const { components, componentSets, styles } = ctx;
 
   // REST's file-level `styles` map lists every local style (even unused
   // ones) plus the remote styles referenced in the file — enumerate local
@@ -249,7 +453,7 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
     }
     let obj: Record<string, unknown>;
     try {
-      obj = await serializeNode(node, components, componentSets, styles);
+      obj = await serializeNode(node, ctx);
     } catch (e) {
       // Resilience: one bad node must never kill the whole frame. Emit the
       // invariant core plus a visible marker under _figmaAgent (Rule B5).
@@ -278,6 +482,10 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
       obj.children = kids.map((c) => objByNode.get(c)).filter(Boolean);
     }
   }
+
+  // Round 1 — instance override tables (needs every instance's main resolved
+  // first, so it runs after the whole tree is serialized).
+  attachInstanceOverrides(objByNode, ctx);
 
   const document = objByNode.get(root);
   if (!document) throw new Error("extraction failed: root node missing");
@@ -346,12 +554,8 @@ function frameBackgroundColor(fills: unknown): { r: number; g: number; b: number
   return { r: 0, g: 0, b: 0, a: 0 };
 }
 
-async function serializeNode(
-  node: SceneNode,
-  components: Record<string, unknown>,
-  componentSets: Record<string, unknown>,
-  styles: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Record<string, unknown>> {
+  const { components, componentSets, styles } = ctx;
   const n = node as any;
 
   // B1 — invariant core. `visible` is emitted only when false and the
@@ -373,7 +577,14 @@ async function serializeNode(
   // constraints — REST emits them on every scene node; the plugin omits
   // the property on GROUPs and auto-layout children. Defaults measured:
   // GROUP/regular → LEFT/TOP, auto-layout child → SCALE/SCALE.
-  if (n.constraints) out.constraints = mapConstraints(n.constraints);
+  // Round 1 (B3): instance children report no constraints when unoverridden
+  // — inherit the main child's value (measured: 13 such nodes in the corpus).
+  let constraints: unknown = n.constraints;
+  if (!constraints || typeof constraints === "symbol") {
+    const mc = mainCorrespondent(node.id, ctx);
+    if (mc && mc.constraints && typeof mc.constraints !== "symbol") constraints = mc.constraints;
+  }
+  if (constraints && typeof constraints !== "symbol") out.constraints = mapConstraints(constraints);
   else
     out.constraints = parentHasAutoLayout(node)
       ? { horizontal: "SCALE", vertical: "SCALE" }
@@ -581,6 +792,9 @@ async function serializeNode(
     if (main) {
       out.componentId = main.id;
       registerComponent(main, components, componentSets);
+      // Round 1 — remember the correspondence for overrides + inheritance
+      ctx.instanceMains.set(node.id, main);
+      if (!ctx.mainIndexes.has(main.id)) ctx.mainIndexes.set(main.id, buildMainIndex(main));
     }
     if (n.componentProperties && Object.keys(n.componentProperties as object).length) {
       out.componentProperties = n.componentProperties;
@@ -605,12 +819,24 @@ async function serializeNode(
   // bound styles — the plugin's *StyleId properties return "" when unbound
   // and a style KEY ("S:<hash>,<id>") when bound; REST node.styles carries
   // the style's node id and the file-level map is keyed by it.
+  // Round 1 (B3): instance children report "" for bindings they only inherit
+  // from the main — resolve through the main child.
+  const mc = mainCorrespondent(node.id, ctx);
+  const binding = (key: string): string | undefined => {
+    const own = styleIdValue(n[key]);
+    if (own) return own;
+    if (mc) {
+      const inherited = styleIdValue((mc as Record<string, unknown>)[key]);
+      if (inherited) return inherited;
+    }
+    return undefined;
+  };
   const styleBindings = omitEmpty({
-    fill: typeof n.fillStyleId === "string" && n.fillStyleId ? n.fillStyleId : undefined,
-    stroke: typeof n.strokeStyleId === "string" && n.strokeStyleId ? n.strokeStyleId : undefined,
-    effect: typeof n.effectStyleId === "string" && n.effectStyleId ? n.effectStyleId : undefined,
-    text: typeof n.textStyleId === "string" && n.textStyleId ? n.textStyleId : undefined,
-    grid: typeof n.gridStyleId === "string" && n.gridStyleId ? n.gridStyleId : undefined,
+    fill: binding("fillStyleId"),
+    stroke: binding("strokeStyleId"),
+    effect: binding("effectStyleId"),
+    text: binding("textStyleId"),
+    grid: binding("gridStyleId"),
   });
   if (Object.keys(styleBindings).length) {
     out.styles = styleBindings;
@@ -675,26 +901,37 @@ function registerComponent(
   if (components[comp.id]) return;
   const parent = comp.parent;
   const setId = parent && parent.type === "COMPONENT_SET" ? parent.id : undefined;
-  components[comp.id] = {
-    key: comp.id,
+  const links = (comp.documentationLinks ?? []) as { uri: string }[];
+  components[comp.id] = omitEmpty({
+    // PublishableMixin.key — the real publish key, present on local AND
+    // published components (measured: REST emits 40-hex keys for local
+    // components too, e.g. 238:75 → 5be0efce…).
+    key: comp.key,
     name: comp.name,
     description: comp.description ?? "",
     ...(setId ? { componentSetId: setId } : {}),
-    documentationLinks: [],
-    remote: false,
-  };
+    // REST emits documentationLinks on EVERY file-level component (remote
+    // included, `[]` when none — measured on the file envelope; remote
+    // componentSets omit it instead).
+    documentationLinks: links,
+    // REST always emits `remote` on components (false for local — measured).
+    remote: !!comp.remote,
+  });
   if (setId && parent) registerComponentSet(parent as ComponentSetNode, componentSets);
 }
 
 function registerComponentSet(set: ComponentSetNode, componentSets: Record<string, unknown>) {
   if (componentSets[set.id]) return;
-  componentSets[set.id] = {
-    key: set.id,
+  const links = (set.documentationLinks ?? []) as { uri: string }[];
+  componentSets[set.id] = omitEmpty({
+    key: set.key,
     name: set.name,
     description: set.description ?? "",
-    documentationLinks: [],
-    remote: false,
-  };
+    ...(set.remote ? (links.length ? { documentationLinks: links } : {}) : { documentationLinks: links }),
+    // REST emits `remote` on component sets only when true — the one local
+    // set in the corpus (238:75) carries no `remote` key (measured).
+    ...(set.remote ? { remote: true } : {}),
+  });
 }
 
 // ---------------------------------------------------------------------------

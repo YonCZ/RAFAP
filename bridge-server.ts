@@ -183,7 +183,7 @@ function latestPageIndex(): StoredPageIndex | null {
 // Command queue — agent asks, the open plugin executes (long-polled).
 // ---------------------------------------------------------------------------
 
-type CommandType = "page-index" | "frame" | "selection" | "export";
+type CommandType = "page-index" | "frame" | "selection" | "export" | "probe";
 
 interface AgentCommand {
   id: string;
@@ -216,7 +216,7 @@ function sweepStale(): void {
 }
 
 function createCommand(type: string, params: any): AgentCommand | null {
-  const valid: CommandType[] = ["page-index", "frame", "selection", "export"];
+  const valid: CommandType[] = ["page-index", "frame", "selection", "export", "probe"];
   if (!valid.includes(type as CommandType)) return null;
   if (type === "frame" && !params?.id) return null;
   if (type === "export" && !Array.isArray(params?.ids)) return null;
@@ -645,6 +645,34 @@ app.get("/v1/files/:key/styles", (req, res) => {
   const merged: Record<string, unknown> = {};
   for (const f of frames) Object.assign(merged, f.styles ?? {});
   res.json({ meta: { styles: Object.values(merged) }, status: 200, error: false });
+});
+
+// Dev-only probe (Round 1): raw node facts from the live plugin for corpus
+// rule-fitting — vectorNetwork regions, constraints, style ids, dimensions.
+app.get("/api/dev/probe", async (req, res) => {
+  try {
+    if (req.query.instanceId) {
+      const result = await runCommand("probe", { instanceId: String(req.query.instanceId) });
+      res.json(result);
+      return;
+    }
+    const ids = String(req.query.ids ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!ids.length) {
+      res.status(400).json({ error: "ids query parameter required" });
+      return;
+    }
+    const result = await runCommand("probe", { ids });
+    res.json(result);
+  } catch (e) {
+    if (e instanceof BridgeError) {
+      restError(res, e.status, e.message);
+      return;
+    }
+    restError(res, 500, (e as Error).message);
+  }
 });
 
 // ---------------------------------------------------------------------------
