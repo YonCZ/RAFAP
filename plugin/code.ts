@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.3.0";
+const PLUGIN_VERSION = "3.4.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
@@ -239,6 +239,24 @@ figma.ui.onmessage = async (msg: any) => {
               // Round 5 (#11 residue): MIXED style ids on rich text — the
               // per-segment bindings are the only view of what REST reports
               // node-level for these nodes.
+              // Round 5 F2: pin-to-viewport reads — typings expose no
+              // scrollBehavior; check whether the runtime does anyway.
+              try {
+                const pin: any = {};
+                try { pin.scrollBehavior = (node as any).scrollBehavior ?? null; } catch (e) { pin.scrollBehavior = `error: ${(e as Error).message}`; }
+                try { pin.isFixed = (node as any).isFixed ?? null; } catch (e) { pin.isFixed = `error: ${(e as Error).message}`; }
+                const names = new Set<string>();
+                let proto: any = Object.getPrototypeOf(node);
+                let guard = 0;
+                while (proto && guard++ < 20) {
+                  for (const nm of Object.getOwnPropertyNames(proto)) names.add(nm);
+                  proto = Object.getPrototypeOf(proto);
+                }
+                pin.protoScrollish = [...names].filter((nm) => /scroll|fixed|sticky/i.test(nm));
+                rec.pinReads = pin;
+              } catch {
+                /* pin probe unavailable */
+              }
               if (node.type === "TEXT") {
                 try {
                   const segs = (node as any).getStyledTextSegments(["fillStyleId", "textStyleId"]);

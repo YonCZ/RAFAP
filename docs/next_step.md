@@ -549,8 +549,25 @@ Unresolved keys accumulate to `store/unresolved-library-styles.json` — a self-
 > - `npm run check` green, 95/95 tests (4 new transition-table tests);
 >   plugin 3.3.0 published; rest-bootstrap re-mined (42 style ids + 1
 >   transition).
-> Next: F1 (`layoutVersion` corpus mine), F2 (`scrollBehavior` prototype
-> walk), F3 (confirm #14/#15 as final).
+>
+> **STATUS: ✅ completed 2026-10-17 — G3 conclusively classified (all 516
+> paths fundamental, each with its recorded experiment).**
+> - **F1 `layoutVersion` (492):** presence is TEXT-only and even correlates
+>   with `strokeWeight` (the 31 absent TEXT nodes are all
+>   `strokeWeight: 0.0` instance texts) — but a full splitter search
+>   (every node/style key, type, parent, depth, id-form, char-length)
+>   found **no feature separating value `3` from `5`** — it is edit
+>   history (the `3` cluster: login-form labels + library instance
+>   texts, untouched since their creation era). Modal `5` fits 89.4%
+>   (440/492) — below the ≥99% bar → no emission, deviation #7 updated.
+> - **F2 `isFixed`/`scrollBehavior` (6):** runtime probe on the three
+>   pinned status-bar instances — `scrollBehavior`/`isFixed` read `null`;
+>   prototype walk finds no scroll/fixed property; the only related
+>   surface is `numberOfFixedChildren` (parent-side aggregate, cannot
+>   identify which child is pinned). Deviation #12 updated with the
+>   experiment.
+> - **F3 (18):** `rotation: 0` history (4, #14) and zeroed-radii history
+>   (14, #15) confirmed final — no plugin surface, no derivation.
 
 ### F1. `layoutVersion` corpus mine (492 paths — 21% of the whole diff)
 
