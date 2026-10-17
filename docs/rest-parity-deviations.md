@@ -42,8 +42,8 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 17 | ~~Intrinsic `lineHeightPx` is an **estimate**~~ **Retired (Round 2):** rewritten from a corpus-fitted per-family multiplier table | ~~435~~ 0 | `lineHeightPx` for AUTO heights is a pure per-family multiplier × fontSize (906 samples, 4 families, worst-case fit error ~1e-6). The bridge rewrites it at persist time (`lib/font-metrics.ts`, table in gitignored `store/font-metrics.json`). REST emits raw float64 doubles; the golden-diff normalizer rounds to 4 decimals, so a <1e-5 fit is byte-exact after normalization. |
 | 18 | ~~`lineHeightPercent` not emitted for `PIXELS`-unit texts~~ **Retired (Round 2):** computed as px ÷ intrinsic × 100 | ~~73~~ 0 | Validated exactly on 146 corpus samples using the multiplier table from #17. Emitted bridge-side at persist time. |
 | 19 | ~~Fixed-height intrinsic texts emit no `lineHeightPx`~~ **Retired (Round 2):** the multiplier table makes it derivable | ~~20~~ 0 | Line height is a property of the style, not the box; REST always emits `lineHeightPx` for INTRINSIC regardless of auto-resize, and the rewriter now does too. |
-| 20 | Default-style baseline: REST stores a node **base style** plus per-range diffs, and the base sometimes matches *no* segment. We use `segments[0]` as the default and diff everything else against it. Also manifests in `fills`: mixed-fill texts get the default segment's paint as the node-level `fills` (matches REST on 7/8 measured nodes; on the eighth, REST's base is the *other* segment, so node-level `fills` and the override-table entry swap). | ~280 paths | The plugin exposes only resolved per-segment styles. The reconstruction is information-equivalent (every segment's full style is derivable both ways), but not byte-identical. |
-| 21 | `styleOverrideTable` entries lack `inheritFillStyleId`/`inheritTextStyleId` | 2 entries | Per-range style ids are not exposed via `getStyledTextSegments`. |
+| 20 | Default-style baseline (Round 3, evidence-complete): REST's node base style is the **stored typing style** — the editor's cursor/insertion style — not necessarily any live segment. Measured on all 10 multi-segment corpus texts: 3 match `segments[0]` (our choice), 3 match another segment (the separator space in two nodes, the style-bound "Register now" segment in one), and 4 match **no live segment** (a Semi Bold typing style set with the cursor placed but never typed — every character keeps its own record). Per-range records can also carry node-level fields (`textAutoResize`) with values differing from the node. | ~310 byte paths, **0 semantic** | The typing style is pure editor state — invisible to the plugin API. Both encodings reconstruct identical per-character styles, which the harness proves: the E2 semantic canonicalization (Round 3) re-encodes both sides with base = resolved char-0 style and diffs that (G4: 340 byte → 13 semantic paths, of which 11 are suspected fixture staleness — see below — and 2 are #37-family override ids). |
+| 21 | `styleOverrideTable` entries lack `inheritFillStyleId`/`inheritTextStyleId` | 4 paths | Per-range style ids are not exposed via `getStyledTextSegments`. Excluded from the semantic-parity measure (dropped by the E2 canonicalizer) — the byte diff still tracks them. |
 | 22 | `letterSpacing` PERCENT converted to px (`fontSize × value ÷ 100`) | — | REST exposes a plain px number; the plugin API has percent units. |
 
 ## Paints / effects
@@ -124,8 +124,42 @@ Notes:
   diff (the #37 stored-record ceiling, SOT variant). Both belong to
   Round 3's base-style model, not to font metrics.
 
+## Text model semantics (Round 3)
+
+The base-style question (deviation #20) is settled as **stored typing
+style** — the fourth manifestation of the stored-record ceiling (#37):
+REST `overrides`, redundant `styleOverrideTable` entries, stored node-level
+`fills` literals, and now the text base style + per-range records that
+carry node-level fields (`textAutoResize`) with range-specific values.
+
+**E2 semantic canonicalization** (`tools/normalize.ts` —
+`canonicalizeTextModel`/`semanticize`): both encodings are re-encoded
+identically — resolve each character's full style (base ⊕ node fills ⊕
+slot delta), drop plugin-invisible fields (`inherit*StyleId`, #21), drop
+lineHeight fields not applicable to the unit (the delta model leaks a
+phantom `lineHeightPercentFontSize` onto INTRINSIC segments), keep
+`textAutoResize` at node level, then re-encode with base = resolved char-0
+style and slots numbered by first appearance. Unreferenced table entries
+(stored records no character uses) carry no rendered information and
+vanish. `golden-diff.ts` reports **byte parity and semantic parity** as
+separate numbers; the scorecard table shows both per root cause.
+
+**G2/G4 semantic residue after E2: 15 paths** (G2 12 → 0, G4 340 → 13):
+
+- 11 `exportSettings` paths on node-mode fixture roots: the live plugin
+  reports a full default export setting (`PNG`, `SCALE 1`, empty suffix —
+  probe-verified byte-identical to nodes where REST serializes it) while
+  the Oct-15 fixtures lack it, **including in the file-envelope fixture**.
+  Suspected corpus staleness (the reference file was edited after the
+  fixtures were fetched — the plugin session re-pulled everything Oct 17).
+  Verify at the next API window with a live re-fetch; if confirmed, refresh
+  the whole golden corpus. The probe now carries `rawExportSettings`.
+- 2 instance-`overrides` id shifts (frame 237:221): remote-main drift, the
+  #37 family.
+
 ## Closed questions (experiments recorded)
 
+- **REST's text base style is the stored typing style (Round 3, E1).** All 10 multi-segment corpus texts examined: REST's slot 0 is used by no character on 4 nodes (a Semi Bold typing style — set with the cursor placed, never typed — every character keeps its own record; no `textStyleId` binding on those nodes), equals `segments[0]` on 3, and equals another live segment on 3 (the separator space on two, the style-bound segment on one). Candidate rules (first/last/longest/last-character/textStyleId-binding) score at best 3/10 — no rule reaches the bar, and the winning interpretation (cursor style) is editor state the plugin API cannot see. Closed as underivable; documented in deviation #20, measured by E2.
 - **`layoutVersion` (deviation #7) is genuinely edit-history.** Corpus mine (`tools/rule-learn.ts layoutVersion`, 492 nodes): 440×5, 51×3, 1×4. The 3s cluster in 4 frames on page 2 — but those same frames also carry 5s, and the value is TEXT-only there while other TEXTs are 5. No type/frame/depth rule reaches the ≥99% bar (best: constant 5 at 89.4%). Not emitted; documented as fundamental.
 - **REST `overrides` are stored records, not live diffs (Round 1).** Decisive evidence: instance `180:310` is 327×48 against a 295×71 main, yet REST reports **no** size override (the library resized the component after insertion; the instance keeps its insertion-era size); nested instance `I180:310;143:1324` carries main-relative ids from an older main version while the live main's subtree uses new ids (`143:…` vs `10:9xx` eras). Both are invisible to the plugin API — see deviation #37.
 - **`fillOverrideTable` is not vector-network region slots (Round 1).** Hypothesis tested with a live probe of all 130 table-carrying vectors plus 40 controls: `vectorNetwork.regions > 0` misclassifies 74 of 170 (53 false negatives, 21 false positives), and the 5 three-slot vectors report exactly 2 regions. See deviation #38.

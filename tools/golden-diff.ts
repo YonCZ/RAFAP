@@ -28,7 +28,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canonicalJson, countLeaves, diffTrees, normalize, type TreeDiff } from "./normalize.js";
+import { canonicalJson, countLeaves, diffTrees, normalize, semanticize, type TreeDiff } from "./normalize.js";
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.dirname(ROOT);
@@ -217,6 +217,11 @@ async function runNodeMode(args: Args): Promise<number> {
   const oursDoc = oursNode.document ?? oursNode;
   const diffs = diffTrees(normalize(restDoc), normalize(oursDoc));
   const pass = diffs.length === 0;
+  const semRest = structuredClone(normalize(restDoc));
+  const semOurs = structuredClone(normalize(oursDoc));
+  semanticize(semRest);
+  semanticize(semOurs);
+  const semDiffs = diffTrees(semRest, semOurs);
 
   writeReport(`Node \`${nodeId}\``, pass, diffs);
   fs.writeFileSync(
@@ -228,7 +233,11 @@ async function runNodeMode(args: Args): Promise<number> {
     canonicalJson(restDoc) + "\n",
   );
 
-  console.log(pass ? `✅ ${nodeId}: identical after normalization` : `❌ ${nodeId}: ${diffs.length} difference(s)`);
+  console.log(
+    pass
+      ? `✅ ${nodeId}: identical after normalization`
+      : `❌ ${nodeId}: ${diffs.length} difference(s)${semDiffs.length < diffs.length ? ` (${semDiffs.length} semantic — ${diffs.length - semDiffs.length} paths are re-encoding only)` : ""}`,
+  );
   diffs.slice(0, 20).forEach((d) =>
     console.log(`  ${d.path} — ${d.kind}${d.kind === "value" ? ` (rest=${JSON.stringify(d.rest)?.slice(0, 60)} ours=${JSON.stringify(d.ours)?.slice(0, 60)})` : ""}`),
   );
@@ -255,12 +264,21 @@ async function runFileMode(args: Args): Promise<number> {
 
   const diffs = diffTrees(normalize(rest), normalize(ours));
   const pass = diffs.length === 0;
+  const semRest = structuredClone(normalize(rest));
+  const semOurs = structuredClone(normalize(ours));
+  semanticize(semRest);
+  semanticize(semOurs);
+  const semDiffs = diffTrees(semRest, semOurs);
 
   writeReport(`File envelope (\`${path.basename(fixture)}\`${args.depth ? `, depth=${args.depth}` : ""})`, pass, diffs);
   fs.writeFileSync(path.join(GOLDEN_DIR, "file-envelope.ours.normalized.json"), canonicalJson(ours) + "\n");
   fs.writeFileSync(path.join(GOLDEN_DIR, "file-envelope.rest.normalized.json"), canonicalJson(rest) + "\n");
 
-  console.log(pass ? `✅ file envelope: identical after normalization` : `❌ file envelope: ${diffs.length} difference(s)`);
+  console.log(
+    pass
+      ? `✅ file envelope: identical after normalization`
+      : `❌ file envelope: ${diffs.length} difference(s)${semDiffs.length < diffs.length ? ` (${semDiffs.length} semantic — ${diffs.length - semDiffs.length} paths are re-encoding only)` : ""}`,
+  );
   diffs.slice(0, 30).forEach((d) =>
     console.log(`  ${d.path} — ${d.kind}${d.kind === "value" ? ` (rest=${JSON.stringify(d.rest)?.slice(0, 50)} ours=${JSON.stringify(d.ours)?.slice(0, 50)})` : ""}`),
   );
@@ -270,10 +288,13 @@ async function runFileMode(args: Args): Promise<number> {
 
 async function runScorecard(): Promise<number> {
   const groups = new Map<string, number>();
+  const semGroups = new Map<string, number>();
   let totalDiffs = 0;
+  let semTotalDiffs = 0;
   let totalLeaves = 0;
   let frames = 0;
   let identical = 0;
+  let semIdentical = 0;
 
   for (const f of fs.readdirSync(GOLDEN_DIR).sort()) {
     if (!f.endsWith(".rest.normalized.json") || f.startsWith("file-")) continue;
@@ -290,9 +311,25 @@ async function runScorecard(): Promise<number> {
       const g = classifyRootCause(d);
       groups.set(g, (groups.get(g) ?? 0) + 1);
     }
+
+    // Semantic pass (Round 3, E2): re-encode the text model canonically on
+    // both sides — base = resolved char-0 style — then diff again. Whatever
+    // remains is an information difference, not a representation difference.
+    const semRest = structuredClone(rest);
+    const semOurs = structuredClone(ours);
+    semanticize(semRest);
+    semanticize(semOurs);
+    const semDiffs = diffTrees(semRest, semOurs);
+    if (semDiffs.length === 0) semIdentical++;
+    semTotalDiffs += semDiffs.length;
+    for (const d of semDiffs) {
+      const g = classifyRootCause(d);
+      semGroups.set(g, (semGroups.get(g) ?? 0) + 1);
+    }
   }
 
   const parity = totalLeaves > 0 ? (100 * (1 - totalDiffs / totalLeaves)).toFixed(3) : "n/a";
+  const semParity = totalLeaves > 0 ? (100 * (1 - semTotalDiffs / totalLeaves)).toFixed(3) : "n/a";
   const lines = [
     `# Golden diff report`,
     ``,
@@ -302,22 +339,30 @@ async function runScorecard(): Promise<number> {
     `|---|---|`,
     `| Frames compared (document trees) | ${frames} |`,
     `| Byte-identical after normalization | ${identical} |`,
-    `| Differing paths | ${totalDiffs} |`,
+    `| Byte-identical after semantic canonicalization | ${semIdentical} |`,
+    `| Differing paths (byte) | ${totalDiffs} |`,
+    `| Differing paths (semantic) | ${semTotalDiffs} |`,
     `| Compared leaves | ${totalLeaves} |`,
     `| Byte parity | ${parity}% |`,
-    `| Semantic parity | not yet measured (E2 canonicalization layer pending) |`,
+    `| Semantic parity | ${semParity}% |`,
     ``,
-    `| Root cause | Paths |`,
-    `|---|---|`,
+    `| Root cause | Byte paths | Semantic paths |`,
+    `|---|---|---|`,
   ];
-  [...groups.entries()].sort((a, b) => b[1] - a[1]).forEach(([g, n]) => lines.push(`| ${g} | ${n} |`));
+  const allGroups = new Set([...groups.keys(), ...semGroups.keys()]);
+  [...allGroups].forEach((g) => lines.push(`| ${g} | ${groups.get(g) ?? 0} | ${semGroups.get(g) ?? 0} |`));
   lines.push(``, `Zero unclassified residue means every path maps to a documented`, `root cause (docs/rest-parity-deviations.md).`, ``);
 
   fs.mkdirSync(path.dirname(REPORT), { recursive: true });
   fs.writeFileSync(REPORT, lines.join("\n") + "\n");
 
-  console.log(`scorecard: ${totalDiffs} paths across ${frames} frames (${identical} identical), byte parity ${parity}%`);
-  [...groups.entries()].sort((a, b) => b[1] - a[1]).forEach(([g, n]) => console.log(`  ${String(n).padStart(5)}  ${g}`));
+  console.log(
+    `scorecard: ${totalDiffs} byte paths / ${semTotalDiffs} semantic paths across ${frames} frames ` +
+      `(${identical} identical), byte parity ${parity}%, semantic parity ${semParity}%`,
+  );
+  [...allGroups].forEach((g) =>
+    console.log(`  ${String(groups.get(g) ?? 0).padStart(5)} byte / ${String(semGroups.get(g) ?? 0).padStart(5)} sem   ${g}`),
+  );
   console.log(`report: ${path.relative(REPO, REPORT)}`);
   return 0;
 }

@@ -415,6 +415,36 @@ If one rule scores 100% (or ≥99% with inspectable outliers), implement it in `
 **Files:** `tools/normalize.ts`, `tools/golden-diff.ts`.
 **Acceptance:** G4 contributes 0 semantic paths even when byte paths remain.
 
+> **STATUS: ✅ completed 2026-10-17.** E1 closed as underivable with
+> decisive evidence; E2 implemented — the harness now reports byte parity
+> **and** semantic parity. `npm run check` green, 77/77 tests.
+> **Scorecard: 1,774 byte / 1,435 semantic paths — byte parity 98.246%,
+> semantic parity 98.582%** (G4: 340 byte → 13 semantic; G2: 12 → 0).
+> Measured outcomes:
+> - **E1: REST's base style is the stored typing style** (the editor's
+>   cursor/insertion style — fourth stored-record manifestation, #37
+>   family). All 10 multi-segment corpus texts examined: 4 bases match no
+>   live segment (Semi Bold typing style, never typed; no `textStyleId`
+>   binding), 3 match `segments[0]`, 3 match another segment (separator
+>   spaces ×2, style-bound segment ×1). No candidate rule reaches the
+>   bar; closed as underivable, deviation #20 rewritten.
+> - **E2 canonicalization lives in `tools/normalize.ts`**
+>   (`canonicalizeTextModel`): resolve per-char styles, drop
+>   plugin-invisible `inherit*StyleId` and non-applicable lineHeight
+>   fields, pin node-level `textAutoResize` (REST range records carry
+>   per-range values for it), re-encode with base = resolved char-0.
+>   Unreferenced stored table entries vanish. `golden-diff.ts` prints
+>   both numbers; the scorecard table gained a Semantic column.
+> - **G4's 13 semantic residue paths:** 11 `exportSettings` on fixture
+>   roots — probe-verified the live plugin reports the full default
+>   setting byte-identical to controls, while the Oct-15 fixtures (file
+>   envelope included) lack it → **suspected corpus staleness**, verify
+>   with a live re-fetch at the next API window (same window as the
+>   pending deviation #33 measurement; a 429 stopped today's attempt).
+>   The other 2 are #37-family override-id shifts.
+> - **Probe extended:** `rawExportSettings` in `/api/dev/probe` node facts
+>   (published to the dev plugin).
+
 ---
 
 ## Round 4 — G1: library harvest (646 paths)

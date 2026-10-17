@@ -84,6 +84,127 @@ function canonicalizeOverrideTable(node: Record<string, unknown>): void {
   node.styleOverrideTable = newTable;
 }
 
+// ---------------------------------------------------------------------------
+// Semantic canonicalization of the text model (Round 3, E2)
+// ---------------------------------------------------------------------------
+
+/**
+ * REST's text model is a base style + per-range deltas, but the base is the
+ * node's **stored typing style** (editor state — see deviation #20): it may
+ * match no live segment, and REST and RAFAP may pick different bases for the
+ * same rendered text. Both encodings are information-equivalent, so this
+ * pass re-encodes both sides identically before diffing:
+ *
+ *   · resolve each character's full style (base ⊕ node fills ⊕ slot delta)
+ *   · drop fields the plugin API cannot see (inherit*StyleId — #21) and
+ *     lineHeight fields not applicable to the unit (the delta model leaks a
+ *     phantom lineHeightPercentFontSize onto INTRINSIC segments)
+ *   · re-encode with base = resolved style of character 0, slots numbered by
+ *     first appearance — unreferenced table entries (stored records, #37)
+ *     carry no rendered information and vanish
+ *
+ * Byte parity stays the primary metric; semantic parity (diff after this
+ * pass) proves representational differences are not information loss.
+ */
+// Keys whose values are per-unit: a segment switching lineHeight unit needs
+// the whole applicable group in its delta (JSON deltas cannot delete keys,
+// so per-field diffing would emit phantom `undefined` entries).
+const LINE_HEIGHT_KEYS = ["lineHeightUnit", "lineHeightPx", "lineHeightPercent", "lineHeightPercentFontSize"] as const;
+
+export function canonicalizeTextModel(node: unknown): void {
+  if (!node || typeof node !== "object" || (node as any).type !== "TEXT") return;
+  const n = node as Record<string, any>;
+  const style = n.style;
+  if (!style || typeof style !== "object") return;
+  const sot = (n.styleOverrideTable ?? {}) as Record<string, any>;
+  const cso = Array.isArray(n.characterStyleOverrides) ? (n.characterStyleOverrides as number[]) : [];
+  const chars = typeof n.characters === "string" ? (n.characters as string) : "";
+
+  const scrub = (s: Record<string, any>): void => {
+    delete s.inheritFillStyleId;
+    delete s.inheritTextStyleId;
+    if (s.lineHeightUnit === "INTRINSIC_%") delete s.lineHeightPercentFontSize;
+    else if (s.lineHeightUnit === "FONT_SIZE_%") {
+      delete s.lineHeightPx;
+      delete s.lineHeightPercent;
+    }
+  };
+
+  const baseStyle = { ...style };
+  if (n.fills !== undefined) baseStyle.fills = n.fills;
+  // textAutoResize is a node-level property (spec: TypeStyle); REST range
+  // records can still carry per-range values — record noise. Keep the
+  // node's value constant so it never fans out into range deltas.
+  const nodeAutoResize = style.textAutoResize;
+  const resolved: Record<string, any>[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    const slot = i < cso.length ? Number(cso[i] ?? 0) : 0;
+    const delta = sot[String(slot)];
+    const full = delta && typeof delta === "object" ? { ...baseStyle, ...delta } : { ...baseStyle };
+    scrub(full);
+    if (nodeAutoResize === undefined) delete full.textAutoResize;
+    else full.textAutoResize = nodeAutoResize;
+    resolved.push(full);
+  }
+
+  const baseFull = resolved.length ? resolved[0] : { ...baseStyle };
+  const styleOut: Record<string, any> = { ...baseFull };
+  delete styleOut.fills;
+
+  const newSot: Record<string, any> = {};
+  const idByKey = new Map<string, number>();
+  const csoOut: number[] = [];
+  let next = 1;
+  for (const full of resolved) {
+    const key = canonicalJson(full);
+    if (key === canonicalJson(baseFull)) {
+      csoOut.push(0);
+      continue;
+    }
+    let id = idByKey.get(key);
+    if (id === undefined) {
+      id = next++;
+      idByKey.set(key, id);
+      const delta: Record<string, any> = {};
+      const isLh = (k: string) => (LINE_HEIGHT_KEYS as readonly string[]).includes(k);
+      const keys = new Set([...Object.keys(full), ...Object.keys(baseFull)].filter((k) => !isLh(k)));
+      for (const k of keys) {
+        if (full[k] !== undefined && canonicalJson(full[k]) !== canonicalJson(baseFull[k])) delta[k] = full[k];
+      }
+      // lineHeight fields travel as the whole applicable group — a unit
+      // switch must replace the group, not diff per-field (a JSON delta
+      // cannot delete keys, so per-field diffing emits phantom undefined).
+      if (LINE_HEIGHT_KEYS.some((k) => canonicalJson(full[k]) !== canonicalJson(baseFull[k]))) {
+        for (const k of LINE_HEIGHT_KEYS) {
+          if (full[k] !== undefined) delta[k] = full[k];
+        }
+      }
+      newSot[String(id)] = delta;
+    }
+    csoOut.push(id);
+  }
+  while (csoOut.length > 0 && csoOut[csoOut.length - 1] === 0) csoOut.pop();
+
+  n.style = styleOut;
+  if (baseFull.fills !== undefined) n.fills = baseFull.fills;
+  else delete n.fills;
+  if (csoOut.length) n.characterStyleOverrides = csoOut;
+  else delete n.characterStyleOverrides;
+  if (Object.keys(newSot).length) n.styleOverrideTable = newSot;
+  else delete n.styleOverrideTable;
+}
+
+/** Apply canonicalizeTextModel to every TEXT node under `root`, in place. */
+export function semanticize(root: unknown): void {
+  if (Array.isArray(root)) {
+    for (const v of root) semanticize(v);
+    return;
+  }
+  if (!root || typeof root !== "object") return;
+  canonicalizeTextModel(root);
+  for (const v of Object.values(root as Record<string, unknown>)) semanticize(v);
+}
+
 export function canonicalJson(value: unknown): string {
   const normalized = normalize(value);
   const sorted = JSON.stringify(normalized, (_k, v) => v, 2);

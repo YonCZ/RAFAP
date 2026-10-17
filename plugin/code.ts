@@ -169,6 +169,16 @@ figma.ui.onmessage = async (msg: any) => {
                 fillStyleId: node.fillStyleId ?? null,
                 textStyleId: node.textStyleId ?? null,
                 characters: node.characters ?? null,
+                // raw export settings — Round 3 E-exportSettings: two nodes
+                // (175:1274, 180:1137) report [{PNG}] to the plugin while
+                // REST serializes none; capture raw shape + counterpart controls
+                rawExportSettings: Array.isArray(node.exportSettings)
+                  ? (node.exportSettings as any[]).map((es) => ({
+                      format: es.format,
+                      constraint: es.constraint ?? null,
+                      suffix: es.suffix ?? null,
+                    }))
+                  : null,
               };
               if (node.type === "VECTOR") {
                 try {
