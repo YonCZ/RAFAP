@@ -46,9 +46,11 @@ import {
 } from "./lib/stitch.js";
 import { parseFontMetricsTable, rewriteFontMetrics } from "./lib/font-metrics.js";
 import {
+  applyTransitionTable,
   collectUnresolvedStyles,
   hasRestBootstrap,
   loadLibraryIndex,
+  loadTransitionTable,
   rewriteFrameStyles,
   writeLibraryHarvest,
   writeRestBootstrap,
@@ -83,6 +85,12 @@ const FONT_METRICS = parseFontMetricsTable(
  */
 const LIBRARIES_DIR = path.join(STORE_DIR, "libraries");
 let LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+/**
+ * Round 5 (D4) — per-file prototype-transition tables (rest-bootstrap).
+ * Keyed by store file key; node ids are file-scoped, so a table never
+ * applies across files. Cleared when a bootstrap is (re)written.
+ */
+const TRANSITION_TABLES = new Map<string, Map<string, import("./lib/library-harvest.js").HarvestedTransition>>();
 
 class BridgeError extends Error {
   constructor(public status: number, message: string) {
@@ -170,6 +178,22 @@ function applyLibraryStyles(f: any): void {
   rewriteFrameStyles(f, LIB_INDEX);
 }
 
+/**
+ * Round 5 (D4) — inject server-side prototype-transition state (duration/
+ * easing — deviation #16) from the file's rest-bootstrap table. The node
+ * id itself is plugin-derived (reactions destinationId); only the
+ * un-seeable duration/easing come from the table.
+ */
+function applyPrototypeTransitions(storeKey: string, f: any): void {
+  let table = TRANSITION_TABLES.get(storeKey);
+  if (!table) {
+    const realKey = realFileKey(storeKey);
+    table = realKey ? loadTransitionTable(LIBRARIES_DIR, realKey) : new Map();
+    TRANSITION_TABLES.set(storeKey, table);
+  }
+  applyTransitionTable(f, table);
+}
+
 /** Rebuild store/<fileKey>/unresolved-library-styles.json from stored frames. */
 function refreshUnresolvedReport(key: string): void {
   const frames = listFramesForFile(key);
@@ -187,6 +211,7 @@ function saveFrame(f: any): { id: string; name: string; file: string } {
   fs.mkdirSync(dir, { recursive: true });
   applyFontMetrics(f);
   applyLibraryStyles(f);
+  applyPrototypeTransitions(key, f);
   const file = path.join(dir, `${frameFileName(f.id)}.json`);
   fs.writeFileSync(file, JSON.stringify(f, null, 2));
   touchMeta(key);
@@ -396,7 +421,9 @@ async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
   }
   if (!token) return;
   try {
-    const res = await fetch(`https://api.figma.com/v1/files/${realKey}?depth=1`, {
+    // Full depth: the style join only needs the `styles` map, but the
+    // transition table (D4) lives on nodes deep in the document tree.
+    const res = await fetch(`https://api.figma.com/v1/files/${realKey}`, {
       headers: { "X-Figma-Token": token },
     });
     if (res.status === 429) {
@@ -407,12 +434,15 @@ async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
       console.log(`[bridge] rest-bootstrap skipped: Figma API ${res.status}`);
       return;
     }
-    const env = (await res.json()) as { styles?: Record<string, any> };
-    const harvest = writeRestBootstrap(LIBRARIES_DIR, realKey, env.styles ?? {});
+    const env = (await res.json()) as { styles?: Record<string, any>; document?: unknown };
+    const harvest = writeRestBootstrap(LIBRARIES_DIR, realKey, env);
     if (harvest) {
       LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+      TRANSITION_TABLES.clear();
       console.log(
-        `[bridge] rest-bootstrap: ${realKey} — ${Object.keys(harvest.styles).length} style ids joined`,
+        `[bridge] rest-bootstrap: ${realKey} — ${Object.keys(harvest.styles).length} style ids` +
+          (harvest.transitions ? `, ${Object.keys(harvest.transitions).length} transitions` : "") +
+          " joined",
       );
     }
   } catch (e) {

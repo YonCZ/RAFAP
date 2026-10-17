@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.0.0";
+const PLUGIN_VERSION = "3.3.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
@@ -150,6 +150,49 @@ figma.ui.onmessage = async (msg: any) => {
               ? { id: main.id, name: main.name, remote: !!main.remote, subtree: dump(main) }
               : null,
           };
+        } else if (params.instances && Array.isArray(params.instances)) {
+          // Round 5 D4/#11: instance-vs-main subtree accessibility — which
+          // children are visible, with which ids, and whether main-side
+          // (library) child ids resolve in this file's id space.
+          const out: any[] = [];
+          for (const iid of params.instances as string[]) {
+            try {
+              const inst: any = await figma.getNodeByIdAsync(iid);
+              if (!inst) {
+                out.push({ id: iid, error: "not found" });
+                continue;
+              }
+              const main: any = await inst.getMainComponentAsync();
+              const kids = Array.isArray(inst.children) ? inst.children.map((c: any) => c.id) : null;
+              const mainKids = main
+                ? Array.isArray(main.children)
+                  ? main.children.map((c: any) => c.id)
+                  : null
+                : null;
+              // can a main-side (library) child id resolve here?
+              let resolvedMainChild: string | null = null;
+              if (mainKids && mainKids.length && typeof mainKids[0] === "string") {
+                try {
+                  const n = await figma.getNodeByIdAsync(mainKids[0]);
+                  resolvedMainChild = n ? n.id : null;
+                } catch (e) {
+                  resolvedMainChild = `error: ${(e as Error).message}`;
+                }
+              }
+              out.push({
+                id: iid,
+                type: inst.type,
+                childIds: kids,
+                mainId: main?.id ?? null,
+                mainRemote: main?.remote ?? null,
+                mainChildIds: mainKids,
+                mainChildResolvesHere: resolvedMainChild,
+              });
+            } catch (e) {
+              out.push({ id: iid, error: (e as Error).message });
+            }
+          }
+          payload = { instances: out };
         } else if (Array.isArray(params.ids) && params.ids.length > 0) {
           const probes: any[] = [];
           for (const id of (params.ids ?? []) as string[]) {
@@ -180,6 +223,34 @@ figma.ui.onmessage = async (msg: any) => {
                     }))
                   : null,
               };
+              // Round 5 D4: raw prototype-transition facts — legacy reads +
+              // reactions as the plugin really reports them (transition:
+              // null in interactions vs REST's transitionDuration 300).
+              try {
+                rec.transitionReads = {
+                  duration: node.transitionDuration ?? null,
+                  easing: node.transitionEasing ?? null,
+                  nodeID: node.transitionNodeID ?? null,
+                };
+                rec.reactionsRaw = JSON.parse(JSON.stringify(node.reactions ?? null));
+              } catch (e) {
+                rec.transitionError = (e as Error).message;
+              }
+              // Round 5 (#11 residue): MIXED style ids on rich text — the
+              // per-segment bindings are the only view of what REST reports
+              // node-level for these nodes.
+              if (node.type === "TEXT") {
+                try {
+                  const segs = (node as any).getStyledTextSegments(["fillStyleId", "textStyleId"]);
+                  rec.textSegments = segs.map((s: any) => ({
+                    fillStyleId: s.fillStyleId ?? null,
+                    textStyleId: s.textStyleId ?? null,
+                    characters: String(s.characters ?? "").slice(0, 24),
+                  }));
+                } catch (e) {
+                  rec.textSegments = `error: ${(e as Error).message}`;
+                }
+              }
               if (node.type === "VECTOR") {
                 try {
                   const vn = node.vectorNetwork;
@@ -289,18 +360,80 @@ function buildMainIndex(main: ComponentNode): Map<string, any> {
 
 /**
  * The main-component correspondent of an instance descendant, or null.
- * Document ids of descendants start with `I<outermostInstanceId>;` — the
- * outermost instance's main index covers the whole subtree (flat keys reach
- * through nested instances).
+ * Two id regimes (probed): Figma has reported descendant document ids as
+ * `I<outermostInstanceId>;<rel>` — resolved through the main index (the
+ * outermost instance's main covers the whole subtree, flat keys reach
+ * through nested instances). Current Figma reports plain ids — fall back
+ * to STRUCTURAL correspondence: the child-index chain up to the nearest
+ * INSTANCE ancestor, walked down that instance's main subtree (instance
+ * children preserve the main's child order; swap-property edits never
+ * reorder children).
  */
-function mainCorrespondent(nodeId: string, ctx: ExtractContext): any | null {
-  const m = /^I([^;]+);(.+)$/.exec(nodeId);
-  if (!m) return null;
-  const main = ctx.instanceMains.get(m[1]);
+function mainCorrespondent(node: any, ctx: ExtractContext): any | null {
+  if (typeof node?.id === "string") {
+    const m = /^I([^;]+);(.+)$/.exec(node.id);
+    if (m) {
+      const main = ctx.instanceMains.get(m[1]);
+      if (!main) return null;
+      const index = ctx.mainIndexes.get(main.id);
+      if (!index) return null;
+      return index.get(flatMainKey(m[2])) ?? index.get(m[2]) ?? null;
+    }
+  }
+  // plain-id regime: structural correspondence via the parent chain
+  const chain: number[] = [];
+  let cur: any = node;
+  let guard = 0;
+  while (cur && cur.type !== "INSTANCE" && guard++ < 64) {
+    const parent = cur.parent;
+    if (!parent || !Array.isArray(parent.children)) return null;
+    const idx = parent.children.indexOf(cur);
+    if (idx < 0) return null;
+    chain.unshift(idx);
+    cur = parent;
+  }
+  if (!cur || cur.type !== "INSTANCE") return null;
+  const main = ctx.instanceMains.get(cur.id);
   if (!main) return null;
-  const index = ctx.mainIndexes.get(main.id);
-  if (!index) return null;
-  return index.get(flatMainKey(m[2])) ?? index.get(m[2]) ?? null;
+  let mc: any = main;
+  for (const idx of chain) {
+    const kids = mc.children;
+    if (!Array.isArray(kids) || idx >= kids.length) return null;
+    mc = kids[idx];
+  }
+  return mc ?? null;
+}
+
+/** Read a property from a main-side node, defensively (remote mains can
+ * restrict reads — an inherited value must never break serialization). */
+function mainProp(mc: any, key: string): unknown {
+  try {
+    return mc?.[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Round 5 (#11 residue) — the node-level style binding REST reports for
+ * MIXED rich text: the LAST segment carrying that style kind. Corpus 3/3:
+ * "Not a member? Register now" reports the trailing link segment's
+ * fill+text (" Register now" = Highlight/Darkest + Action/Action M); the
+ * checkbox label, whose last segment is the plain body style, reports
+ * body+body; a node ending in unstyled characters falls back to the last
+ * styled segment.
+ */
+function lastSegmentStyleId(node: any, key: string): string | undefined {
+  try {
+    const segs = node.getStyledTextSegments([key]) as any[];
+    for (let i = segs.length - 1; i >= 0; i--) {
+      const v = styleIdValue(segs[i]?.[key]);
+      if (v) return v;
+    }
+  } catch {
+    /* segments unavailable — leave the binding unemitted */
+  }
+  return undefined;
 }
 
 /**
@@ -564,6 +697,25 @@ function restNodeType(pluginType: string): string {
 }
 
 /**
+ * The first NODE-type action's destination across a node's reactions —
+ * REST's legacy `transitionNodeID`. Cross-file destinations included: the
+ * plugin reports the destination's own id (e.g. a library-side frame)
+ * even though it cannot resolve the node itself.
+ */
+function firstNodeDestinationId(reactions: unknown): string | undefined {
+  if (!Array.isArray(reactions)) return undefined;
+  for (const r of reactions as any[]) {
+    const actions = Array.isArray(r?.actions) ? r.actions : r?.action ? [r.action] : [];
+    for (const a of actions as any[]) {
+      if (a?.type === "NODE" && typeof a?.destinationId === "string" && a.destinationId) {
+        return a.destinationId;
+      }
+    }
+  }
+  return undefined;
+}
+
+/**
  * REST StyleType vocabulary: the plugin's BaseStyle.type says "PAINT" where
  * REST's style metadata says "FILL" (others — TEXT, EFFECT, GRID — agree).
  */
@@ -647,8 +799,9 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
   // — inherit the main child's value (measured: 13 such nodes in the corpus).
   let constraints: unknown = n.constraints;
   if (!constraints || typeof constraints === "symbol") {
-    const mc = mainCorrespondent(node.id, ctx);
-    if (mc && mc.constraints && typeof mc.constraints !== "symbol") constraints = mc.constraints;
+    const mc = mainCorrespondent(node, ctx);
+    const inherited = mainProp(mc, "constraints");
+    if (inherited && typeof inherited !== "symbol") constraints = inherited;
   }
   if (constraints && typeof constraints !== "symbol") out.constraints = mapConstraints(constraints);
   else
@@ -788,6 +941,17 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
   if (typeof n.transitionDuration === "number") out.transitionDuration = n.transitionDuration;
   if (typeof n.transitionEasing === "string") out.transitionEasing = n.transitionEasing;
   if (typeof n.transitionNodeID === "string") out.transitionNodeID = n.transitionNodeID;
+  // Round 5 (D4): REST derives the legacy triple from reactions — and the
+  // legacy reads above are always null in current Figma (probed: even a
+  // wired instance reports null from all three). The first NODE action's
+  // destinationId IS the destination node id, cross-file included (probed:
+  // '10:1098', the library-side frame REST emits). Duration/easing remain
+  // server-side — the bridge's rest-bootstrap transition table injects
+  // them at persist time (deviation #16).
+  if (out.transitionNodeID === undefined) {
+    const dest = firstNodeDestinationId(n.reactions);
+    if (dest) out.transitionNodeID = dest;
+  }
 
   // how this node sits inside layouts — REST only emits these on children
   // of auto-layout containers (layoutSizing also on auto-layout frames
@@ -882,18 +1046,21 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     registerComponentSet(node as ComponentSetNode, componentSets);
   }
 
-  // bound styles — the plugin's *StyleId properties return "" when unbound
+  // Bound styles — the plugin's *StyleId properties return "" when unbound
   // and a style KEY ("S:<hash>,<id>") when bound; REST node.styles carries
   // the style's node id and the file-level map is keyed by it.
-  // Round 1 (B3): instance children report "" for bindings they only inherit
-  // from the main — resolve through the main child.
-  const mc = mainCorrespondent(node.id, ctx);
+  // Round 5 correction: REST reports ONLY stored per-node bindings — no
+  // inheritance from the main (measured: instance selves and children with
+  // main-side bindings emit nothing in REST). The one plugin gap is MIXED
+  // rich text, where REST reports the LAST styled segment's binding.
   const binding = (key: string): string | undefined => {
-    const own = styleIdValue(n[key]);
+    const raw = n[key];
+    const own = styleIdValue(raw);
     if (own) return own;
-    if (mc) {
-      const inherited = styleIdValue((mc as Record<string, unknown>)[key]);
-      if (inherited) return inherited;
+    // MIXED rich text: REST reports the last styled segment's binding
+    if (typeof raw === "symbol" && node.type === "TEXT") {
+      const seg = lastSegmentStyleId(node, key);
+      if (seg) return seg;
     }
     return undefined;
   };

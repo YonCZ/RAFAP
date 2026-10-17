@@ -49,6 +49,13 @@ export interface LibraryHarvest {
   harvestedAt: string;
   /** 40-hex publish key → library-side style record. */
   styles: Record<string, HarvestedStyle>;
+  /**
+   * Rest-bootstrap only: this file's own node id → prototype transition
+   * (duration/easing are server-side state the plugin cannot see). Node
+   * ids are file-scoped — this table must only be applied to the file it
+   * was bootstrapped from, never merged globally like `styles`.
+   */
+  transitions?: Record<string, HarvestedTransition>;
   /** Provenance: "plugin-harvest" (run inside the file) or "rest-bootstrap". */
   source?: string;
 }
@@ -58,6 +65,22 @@ export interface UnresolvedStyle {
   key: string;
   name: string;
   usedBy: string[];
+}
+
+/**
+ * Round 5 (D4) — a prototype-transition record mined from REST. The node's
+ * `transitionNodeID` (the destination, often a library-side frame) IS
+ * plugin-visible via reactions (`action.destinationId`), but
+ * `transitionDuration`/`transitionEasing` are server-side state the plugin
+ * cannot see (probed: legacy reads and `action.transition` are all null
+ * while REST reports 300/EASE_OUT — deviation #16). Keyed by the file's
+ * OWN node ids — unlike style keys these are not globally unique, so a
+ * transitions table only applies to the file it was bootstrapped from.
+ */
+export interface HarvestedTransition {
+  transitionNodeID?: string;
+  transitionDuration?: number;
+  transitionEasing?: string;
 }
 
 /** Page-index `styles` map entry (keyed by file-local node id). */
@@ -172,19 +195,45 @@ export function bootstrapFromRestStyles(
   return styles;
 }
 
-/** Persist a rest-bootstrap join table (mined from a REST envelope). */
+/**
+ * Mine the file's prototype-transition table from a REST envelope's document
+ * tree: every node with a `transitionNodeID` (REST's legacy surface, derived
+ * server-side from reactions). Duration/easing are un-seeable from the
+ * plugin (deviation #16), so this is the only source for them.
+ */
+export function bootstrapTransitionsFromDocument(
+  documentRoot: unknown,
+): Record<string, HarvestedTransition> {
+  const transitions: Record<string, HarvestedTransition> = {};
+  for (const node of walkNodes(documentRoot)) {
+    if (typeof node.id !== "string" || typeof node.transitionNodeID !== "string") continue;
+    const t: HarvestedTransition = { transitionNodeID: node.transitionNodeID };
+    if (typeof node.transitionDuration === "number") t.transitionDuration = node.transitionDuration;
+    if (typeof node.transitionEasing === "string") t.transitionEasing = node.transitionEasing;
+    transitions[node.id] = t;
+  }
+  return transitions;
+}
+
+/**
+ * Persist a rest-bootstrap join table (mined from a REST envelope). Takes
+ * the whole envelope: `styles` → the key→nodeId join, `document` → this
+ * file's prototype-transition table (Round 5 D4).
+ */
 export function writeRestBootstrap(
   librariesDir: string,
   realFileKey: string,
-  stylesMap: Record<string, any>,
+  envelope: { styles?: Record<string, any>; document?: unknown },
   now = new Date(),
 ): LibraryHarvest | null {
-  const styles = bootstrapFromRestStyles(stylesMap);
-  if (!Object.keys(styles).length) return null;
+  const styles = bootstrapFromRestStyles(envelope?.styles ?? {});
+  const transitions = bootstrapTransitionsFromDocument(envelope.document);
+  if (!Object.keys(styles).length && !Object.keys(transitions).length) return null;
   const harvest: LibraryHarvest = {
     fileKey: realFileKey,
     harvestedAt: now.toISOString(),
     styles,
+    ...(Object.keys(transitions).length ? { transitions } : {}),
     source: "rest-bootstrap",
   };
   fs.mkdirSync(librariesDir, { recursive: true });
@@ -296,4 +345,56 @@ export function collectUnresolvedStyles(
     }
   }
   return [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+/**
+ * Round 5 (D4) — load ONE file's prototype-transition table. Node ids are
+ * file-scoped, so — unlike the styles index — tables are never merged
+ * across files: only the bootstrap of the file being served applies.
+ */
+export function loadTransitionTable(
+  librariesDir: string,
+  realFileKey: string,
+): Map<string, HarvestedTransition> {
+  const table = new Map<string, HarvestedTransition>();
+  let harvest: LibraryHarvest | null = null;
+  try {
+    harvest = JSON.parse(
+      fs.readFileSync(path.join(librariesDir, `bootstrap_${safeFileName(realFileKey)}.json`), "utf8"),
+    );
+  } catch {
+    return table; // no bootstrap for this file — degradation, not an error
+  }
+  for (const [nodeId, t] of Object.entries(harvest?.transitions ?? {})) {
+    if (nodeId && t?.transitionNodeID) table.set(nodeId, t);
+  }
+  return table;
+}
+
+/**
+ * Round 5 (D4) — inject a file's prototype-transition records into a stored
+ * frame at persist time. The plugin derives `transitionNodeID` itself from
+ * reactions (`action.destinationId` is the library-side node id), so the
+ * table only fills it when missing; `transitionDuration`/`transitionEasing`
+ * are server-side state the plugin cannot see at all (deviation #16), so a
+ * table entry is authoritative for them. Nodes not in the table are
+ * untouched; injection is idempotent.
+ */
+export function applyTransitionTable(
+  frame: any,
+  table: Map<string, HarvestedTransition>,
+): number {
+  if (!table.size) return 0;
+  let injected = 0;
+  for (const node of walkNodes(frame?.document)) {
+    const t = typeof node.id === "string" ? table.get(node.id) : undefined;
+    if (!t) continue;
+    if (node.transitionNodeID === undefined && t.transitionNodeID !== undefined) {
+      node.transitionNodeID = t.transitionNodeID;
+    }
+    if (t.transitionDuration !== undefined) node.transitionDuration = t.transitionDuration;
+    if (t.transitionEasing !== undefined) node.transitionEasing = t.transitionEasing;
+    injected++;
+  }
+  return injected;
 }

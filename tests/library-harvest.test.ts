@@ -7,9 +7,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  applyTransitionTable,
   collectUnresolvedStyles,
   hasRestBootstrap,
   loadLibraryIndex,
+  loadTransitionTable,
   rewriteFrameStyles,
   writeLibraryHarvest,
   writeRestBootstrap,
@@ -264,7 +266,7 @@ describe("rest bootstrap", () => {
   };
 
   it("writeRestBootstrap mines the join from a REST envelope styles map", () => {
-    const harvest = writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    const harvest = writeRestBootstrap(TMP, "real-key-1", { styles: REST_ENVELOPE_STYLES });
     expect(harvest).not.toBeNull();
     expect(harvest!.source).toBe("rest-bootstrap");
     expect(harvest!.styles["bccec8610eaa78b9e79480f8026fa2f055cd2b52"]).toEqual({
@@ -278,17 +280,19 @@ describe("rest bootstrap", () => {
 
   it("hasRestBootstrap detects the cache; degenerate entries are skipped", () => {
     expect(hasRestBootstrap(TMP, "real-key-1")).toBe(false);
-    writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    writeRestBootstrap(TMP, "real-key-1", { styles: REST_ENVELOPE_STYLES });
     expect(hasRestBootstrap(TMP, "real-key-1")).toBe(true);
     const harvest = writeRestBootstrap(TMP, "real-key-2", {
-      "": { key: "ab".repeat(20), name: "no node id", styleType: "FILL" },
-      "1:1": { key: "", name: "no publish key", styleType: "FILL" },
+      styles: {
+        "": { key: "ab".repeat(20), name: "no node id", styleType: "FILL" },
+        "1:1": { key: "", name: "no publish key", styleType: "FILL" },
+      },
     });
     expect(harvest).toBeNull();
   });
 
   it("the rewrite repairs degenerate local markers via the bootstrap join", () => {
-    writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    writeRestBootstrap(TMP, "real-key-1", { styles: REST_ENVELOPE_STYLES });
     const frame = {
       // live plugin emission: Purple-main's marker is the empty string
       styles: {
@@ -312,6 +316,117 @@ describe("rest bootstrap", () => {
     expect((frame.styles as any)["67:659"]).toBeDefined();
     expect((frame.styles as any)[""]).toBeUndefined();
     expect((frame.document as any).children[0].styles.fill).toBe("67:659");
+  });
+});
+
+describe("prototype transition table (Round 5 D4)", () => {
+  const ENV = {
+    styles: {
+      "36:572": {
+        key: "bccec8610eaa78b9e79480f8026fa2f055cd2b52",
+        name: "Icon/Icon Grid",
+        styleType: "GRID",
+        remote: true,
+        description: "",
+      },
+    },
+    document: {
+      id: "0:1",
+      type: "DOCUMENT",
+      children: [
+        {
+          id: "0:2",
+          type: "CANVAS",
+          children: [
+            {
+              id: "180:335",
+              type: "INSTANCE",
+              transitionNodeID: "10:1098",
+              transitionDuration: 300,
+              transitionEasing: "EASE_OUT",
+              children: [{ id: "180:336", type: "RECTANGLE" }],
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("writeRestBootstrap mines transitions from the document tree", () => {
+    const harvest = writeRestBootstrap(TMP, "real-key-1", ENV);
+    expect(harvest!.transitions).toEqual({
+      "180:335": { transitionNodeID: "10:1098", transitionDuration: 300, transitionEasing: "EASE_OUT" },
+    });
+  });
+
+  it("loadTransitionTable is scoped to the file's own bootstrap only", () => {
+    writeRestBootstrap(TMP, "real-key-1", ENV);
+    writeRestBootstrap(TMP, "real-key-2", {
+      styles: {
+        "1:1": { key: "cd".repeat(20), name: "Other file", styleType: "FILL", remote: true },
+      },
+      document: {
+        id: "0:1",
+        children: [
+          {
+            id: "180:335", // same node id, different file — must not leak
+            type: "INSTANCE",
+            transitionNodeID: "99:1",
+            transitionDuration: 1,
+          },
+        ],
+      },
+    });
+    const table = loadTransitionTable(TMP, "real-key-1");
+    expect(table.get("180:335")).toEqual({
+      transitionNodeID: "10:1098",
+      transitionDuration: 300,
+      transitionEasing: "EASE_OUT",
+    });
+    // a file with no bootstrap degrades to an empty table
+    expect(loadTransitionTable(TMP, "nope").size).toBe(0);
+  });
+
+  it("applyTransitionTable injects missing fields, never overwrites the live node id", () => {
+    writeRestBootstrap(TMP, "real-key-1", ENV);
+    const table = loadTransitionTable(TMP, "real-key-1");
+    const frame: any = {
+      id: "180:324",
+      document: {
+        id: "180:324",
+        type: "FRAME",
+        children: [
+          {
+            id: "180:335",
+            type: "INSTANCE",
+            // the plugin derived the destination live (reactions)
+            transitionNodeID: "10:1098",
+            children: [{ id: "180:336", type: "RECTANGLE" }],
+          },
+        ],
+      },
+    };
+    const injected = applyTransitionTable(frame as any, table);
+    expect(injected).toBe(1);
+    const n = frame.document.children[0];
+    expect(n.transitionNodeID).toBe("10:1098"); // live value kept
+    expect(n.transitionDuration).toBe(300); // server-side state filled
+    expect(n.transitionEasing).toBe("EASE_OUT");
+    // idempotent + nodes not in the table untouched
+    expect(applyTransitionTable(frame as any, table)).toBe(1);
+    expect(frame.document.children[0].children[0]).toEqual({ id: "180:336", type: "RECTANGLE" });
+  });
+
+  it("a table entry fills the node id when the plugin could not derive it", () => {
+    writeRestBootstrap(TMP, "real-key-1", ENV);
+    const table = loadTransitionTable(TMP, "real-key-1");
+    const frame: any = {
+      id: "180:324",
+      document: { id: "180:324", type: "FRAME", children: [{ id: "180:335", type: "INSTANCE" }] },
+    };
+    applyTransitionTable(frame as any, table);
+    expect(frame.document.children[0].transitionNodeID).toBe("10:1098");
+    expect(frame.document.children[0].transitionDuration).toBe(300);
   });
 });
 

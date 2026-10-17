@@ -28,12 +28,12 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 8 | Instance `overrides` arrays not emitted | ~146 | The plugin has no override table for instance children. |
 | 9 | `fillOverrideTable` not emitted | ~130 | Not exposed by the plugin API. |
 | 10 | ~~**Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`)~~ **Retired (Round 4):** rest-bootstrap join re-keys both to the library node id at persist time | ~~649~~ 6 | The plugin cannot see ids inside the defining library file — but a REST file envelope's `styles` map **is** the key→nodeId join table. One cached call per file (or a saved envelope fixture) mines it; frames are rewritten on persist (`lib/library-harvest.ts`). The bridge auto-bootstraps on fresh pull when the token + `store/file-key-aliases.json` are present (429/offline-safe). Residue: D4 prototype transitions (see *Library style ids* below). |
-| 11 | Inherited properties on instance children omitted — style bindings (plugin returns `""`) and `SCALE`/`SCALE` constraints (plugin returns the MIXED sentinel) | 3 nodes + 26 paths | Would require resolving the main component's corresponding child node (the `;`-suffix in instance child ids encodes the original node id). Future work. |
+| 11 | ~~Inherited properties on instance children omitted — style bindings (plugin returns `""`) and `SCALE`/`SCALE` constraints (plugin returns the MIXED sentinel)~~ **style-binding half retired (Round 5 — corrected diagnosis):** the 3 nodes were MIXED *rich text*, not instance inheritance — REST reports the **last styled segment's** binding for those (`getStyledTextSegments`, corpus 3/3: "Not a member? Register now" reports the trailing link segment's fill+text). REST emits only stored per-node bindings elsewhere — no main-inheritance for `node.styles` (measured: instance selves/children with main-side bindings emit nothing). The `SCALE`/`SCALE` constraints half remains | 26 paths (constraints only) | Would require resolving the main component's corresponding child node (the `;`-suffix in instance child ids encodes the original node id). Future work. |
 | 12 | `scrollBehavior` always `"SCROLLS"`; `isFixed` never emitted | 3 nodes | The plugin API has no pinned-frame detection. |
 | 13 | ~~`fontPostScriptName` always `null`~~ **Retired (Round 2):** bridge-side corpus table emits the 5 (family, style) combos REST names | ~~38~~ 0 | The rule is `Family-Style` (spaces stripped), but REST only has server-side names for some combos — Inter is null except `Inter/Medium` in the corpus. Presence is tabulated in `store/font-metrics.json` (build: `tools/build-font-metrics.ts`), not derived. On `styleOverrideTable` entries REST emits it (name or null) exactly when `fontFamily` is in the delta (34/34 corpus entries). |
 | 14 | `rotation` omitted when `0` — REST emits `rotation: 0` on nodes that once had rotation (history) | 4 nodes | The plugin cannot distinguish "never rotated" from "rotated back to 0". |
 | 15 | Zeroed `rectangleCornerRadii: [0,0,0,0]` + `cornerSmoothing: 0` not emitted for nodes with radius *history* but zero radius (6 VECTOR + 1 GROUP) | 7 nodes / 14 paths | History is not visible. `VectorNode` exposes **no** corner properties in the plugin API (`cornerRadius`/`cornerSmoothing` are undefined at runtime), so even the mask heuristic cannot fire for vectors; GROUP radius history is likewise invisible. |
-| 16 | Frame-level `transitionDuration`/`transitionEasing`/`transitionNodeID` not derived from `NODE` actions | 1 node | REST derives these from a remote (library) destination frame the plugin cannot read. `interactions` themselves match REST exactly. |
+| 16 | ~~Frame-level `transitionDuration`/`transitionEasing`/`transitionNodeID` not derived from `NODE` actions~~ **Retired (Round 5):** `transitionNodeID` is derived in the plugin from the first NODE action's `destinationId` (probed: the plugin reports the library-side node id directly, cross-file included); `transitionDuration`/`transitionEasing` are injected by the bridge from the rest-bootstrap transition table (server-side state — probed: legacy reads and `action.transition` are all null while REST reports 300/EASE_OUT) | ~~6~~ 0 | REST derives these from a remote (library) destination frame. `interactions` themselves match REST exactly. |
 
 ## Text
 
@@ -196,10 +196,16 @@ byte-identical to REST (42/42 entries).
   file history: all local styles keyed the map under `""`, the last one
   winning. Fixed (full-id keying); DevBoard's 19 local styles reappeared
   and all joined to their REST ids (`67:659` etc.).
-- **Residue — 6 paths (D4):** one prototype transition
+- **Residue — 6 paths (D4): CLOSED (Round 5).** One prototype transition
   (`transitionDuration`/`Easing`/`NodeID` → `10:1098`, a library-side
-  frame) on frame 180:324; deviation #16. Optional closure: a node-level
-  transition LUT mined from the same rest-bootstrap envelope.
+  frame) on frame 180:324; deviation #16. Closed by: plugin derives
+  `transitionNodeID` from the first NODE action's `destinationId`
+  (probe-verified: the plugin reports the library node id directly,
+  cross-file included — no join needed); `transitionDuration`/
+  `transitionEasing` are server-side state (probed: legacy reads and
+  `action.transition` all null) injected by the bridge from the
+  rest-bootstrap **transition table** (`bootstrapTransitionsFromDocument`,
+  per-file — node ids are file-scoped, never merged globally).
 
 ## Closed questions (experiments recorded)
 

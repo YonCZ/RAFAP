@@ -525,6 +525,33 @@ Unresolved keys accumulate to `store/unresolved-library-styles.json` — a self-
 
 ## Round 5 — G3: history metadata (516 paths)
 
+> **STATUS: 🚧 in progress 2026-10-17.** Pre-work (G1 → **0 paths**, byte
+> parity 98.888%, semantic 99.223%):
+> - **D4 closed (deviation #16 retired):** `transitionNodeID` is derived in
+>   the plugin from the first NODE action's `destinationId` — probe-verified
+>   that the plugin reports the library-side node id *directly* (cross-file
+>   included), so no join is needed. `transitionDuration`/`transitionEasing`
+>   are server-side state (probed: legacy reads and `action.transition` are
+>   all null while REST reports 300/EASE_OUT) — injected by the bridge from
+>   the rest-bootstrap **transition table** (`bootstrapTransitionsFromDocument`,
+>   per-file; node ids are file-scoped so tables never merge globally; the
+>   auto-bootstrap now fetches the full envelope instead of `?depth=1`).
+> - **Deviation #11 style-binding half retired (corrected diagnosis):** the
+>   "inherited instance-child bindings" were actually **MIXED rich text** —
+>   REST reports the **last styled segment's** binding (corpus 3/3 via
+>   `getStyledTextSegments`). Measured in the same pass: REST emits only
+>   stored per-node `node.styles` — no main-inheritance (the mc-inheritance
+>   in `binding()` was removed after it introduced 7 false positives).
+> - **`mainCorrespondent` hardened:** structural fallback (parent-chain +
+>   child-index walk) for plain-id descendants, defensive `mainProp` reads.
+>   Constraints inheritance (B3) unchanged in effect (G5 257 → 257).
+> - File envelope: 1,660 byte / 808 semantic diffs (was 1,666/835).
+> - `npm run check` green, 95/95 tests (4 new transition-table tests);
+>   plugin 3.3.0 published; rest-bootstrap re-mined (42 style ids + 1
+>   transition).
+> Next: F1 (`layoutVersion` corpus mine), F2 (`scrollBehavior` prototype
+> walk), F3 (confirm #14/#15 as final).
+
 ### F1. `layoutVersion` corpus mine (492 paths — 21% of the whole diff)
 
 **Finding.** `.spec/api_types.ts` → `TypePropertiesTrait.layoutVersion?: number` — *"Internal property, preserved for backward compatibility. Avoid using this value."* The plugin exposes nothing equivalent (deviation #7). But it may be boringly deterministic (e.g. constant per node type in modern files) — worth one analysis before declaring it fundamental.
