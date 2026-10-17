@@ -438,9 +438,9 @@ If one rule scores 100% (or ≥99% with inspectable outliers), implement it in `
 > - **G4's 13 semantic residue paths:** 11 `exportSettings` on fixture
 >   roots — probe-verified the live plugin reports the full default
 >   setting byte-identical to controls, while the Oct-15 fixtures (file
->   envelope included) lack it → **suspected corpus staleness**, verify
->   with a live re-fetch at the next API window (same window as the
->   pending deviation #33 measurement; a 429 stopped today's attempt).
+>   envelope included) lack it → **suspected corpus staleness** (resolved
+>   Round 6 — live re-fetch confirmed the staleness and the corpus
+>   refresh closed all 11; see Round 6 STATUS).
 >   The other 2 are #37-family override-id shifts.
 > - **Probe extended:** `rawExportSettings` in `/api/dev/probe` node facts
 >   (published to the dev plugin).
@@ -625,9 +625,26 @@ Either outcome is a win: 492 paths resolved or conclusively classified.
 >   `explicitVariableModes`, no `textTruncation`/`maxLines`/`listSpacing`/
 >   `semantic*`, no TEXT_PATH nodes. Per the round rule: documented as
 >   "not present in reference corpus", nothing implemented.
-> - **Scorecard:** 1,123 byte / 786 semantic (was 1,125/786 — G4 340→338
->   byte; semantic unchanged by design); file envelope 1,658/808 (was
->   1,660/808). `npm run check` green, 96/96 tests; plugin 3.5.1 live.
+> - **Scorecard:** 1,112 byte / 775 semantic (1,125/786 before the round —
+>   #21 closed 2 byte paths, the corpus refresh closed 11+11 more);
+>   file envelope 1,647/797 (was 1,660/808). 3 identical frames.
+>   `npm run check` green, 96/96 tests; plugin 3.5.1 live.
+> - **API-window work (2026-10-17, window open):**
+>   - **exportSettings staleness confirmed and fixed:** the reference file
+>     was edited Oct 16 (version `2410344…` → `2411068…`), adding export
+>     settings to 11 top-level frames after the fixture fetch. Live
+>     re-fetch + corpus refresh closed the 11 G4 residue paths exactly as
+>     predicted (G4 338 → 327 byte, 13 → 2 semantic; the 2 left are the
+>     documented #37-family override-id shifts on 237:221). A 429 stopped
+>     the second `/nodes` call (§9.2 discipline); the remaining 10
+>     fixtures were assembled from the same-epoch full-file response
+>     (subtrees verbatim from REST, wrapper from the one real `/nodes`
+>     response, entry maps not compared by the harness).
+>   - **Deviation #33 resolved (live-measured):** real `/nodes` wrapper =
+>     `name/role/lastModified/editorType/version/thumbnailUrl/linkAccess`,
+>     entries without `name` (our spec-derived shape was right). Dropped
+>     our non-spec `err: null` from success wrappers; added `linkAccess:
+>     "inherit"` (plugin-invisible envelope constant).
 > - **Ops incident (root-caused):** "frame commands hanging for minutes"
 >   was webview suspension, not code — when Figma's window is on a
 >   non-active Space the plugin panel is throttled/suspended and queued

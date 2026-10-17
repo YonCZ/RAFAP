@@ -162,9 +162,12 @@ export function buildFileEnvelope(
  * nested under `nodes[id].document` with its own component maps.
  *
  * The wrapper mirrors GetFileNodesResponse: `name`, `role`, `lastModified`,
- * `editorType`, `thumbnailUrl`, `version`, `err` at the top level and NO
- * `name` on entries (spec 0.44.0; spec-derived pending one measurement —
- * see deviations doc).
+ * `editorType`, `thumbnailUrl`, `version`, `linkAccess` at the top level and
+ * NO `name` on entries (spec 0.44.0; live-measured 2026-10-17 against a real
+ * /nodes response — see deviations doc #33). Real success wrappers carry no
+ * `err` (that field belongs to error payloads and /images), so neither do
+ * we. `linkAccess` is plugin-invisible; we emit the file envelope's constant
+ * "inherit" (documented deviation, same rationale as buildFileEnvelope).
  */
 export function buildNodesResponse(
   frames: StoredFrame[],
@@ -195,7 +198,7 @@ export function buildNodesResponse(
     editorType: "figma",
     thumbnailUrl: "", // no local thumbnail source — documented deviation
     version: `local-${meta?.fileKey ?? "unknown"}`,
+    linkAccess: "inherit",
     nodes,
-    err: null,
   };
 }

@@ -75,7 +75,8 @@ describe("buildFileEnvelope", () => {
 describe("buildNodesResponse", () => {
   it("nests each tree under nodes[id].document with the GetFileNodesResponse wrapper", () => {
     const res = buildNodesResponse([frame("1:1", "A")], {}, { fileKey: "local-x" });
-    expect(res.err).toBeNull();
+    expect(res.err).toBeUndefined();
+    expect(res.linkAccess).toBe("inherit");
     expect(res.role).toBe("owner");
     expect(res.editorType).toBe("figma");
     expect(res.thumbnailUrl).toBe("");
