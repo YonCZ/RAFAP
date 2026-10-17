@@ -310,18 +310,33 @@ export function rewriteFrameStyles(frame: any, index: Map<string, HarvestedStyle
   for (const u of unresolvedByMarker.values()) unresolvedByKey.set(u.key, u);
   for (const node of walkNodes(frame?.document)) {
     const bindings = node.styles;
-    if (!bindings || typeof bindings !== "object") continue;
-    const hits = new Set<string>(); // distinct unresolved keys bound on this node
-    for (const [field, value] of Object.entries(bindings)) {
-      if (typeof value !== "string") continue;
-      const to = rename.get(value);
-      if (to !== undefined) bindings[field] = to;
-      else {
-        const entry = unresolvedByMarker.get(value);
-        if (entry) hits.add(entry.key);
+    if (bindings && typeof bindings === "object") {
+      const hits = new Set<string>(); // distinct unresolved keys bound on this node
+      for (const [field, value] of Object.entries(bindings)) {
+        if (typeof value !== "string") continue;
+        const to = rename.get(value);
+        if (to !== undefined) bindings[field] = to;
+        else {
+          const entry = unresolvedByMarker.get(value);
+          if (entry) hits.add(entry.key);
+        }
+      }
+      if (hits.size) for (const key of hits) unresolvedByKey.get(key)?.usedBy.push(node.id);
+    }
+    // Round 6 (#21) — styleOverrideTable entries carry the range's bound
+    // style ids in marker form; rename them through the same join.
+    const sot = node.styleOverrideTable;
+    if (sot && typeof sot === "object") {
+      for (const entry of Object.values(sot as Record<string, Record<string, unknown>>)) {
+        if (!entry || typeof entry !== "object") continue;
+        for (const field of ["inheritFillStyleId", "inheritTextStyleId"]) {
+          const v = entry[field];
+          if (typeof v !== "string") continue;
+          const to = rename.get(v);
+          if (to !== undefined) entry[field] = to;
+        }
       }
     }
-    for (const key of hits) unresolvedByKey.get(key)?.usedBy.push(node.id);
   }
 
   return { resolved, unresolved: [...unresolvedByMarker.values()] };

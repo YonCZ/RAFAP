@@ -319,7 +319,7 @@ function sweepStale(): void {
   for (const c of commands.values()) {
     if ((c.status === "pending" || c.status === "delivered") && now - c.createdAt > COMMAND_TIMEOUT_MS) {
       c.status = "timeout";
-      c.error = "plugin did not respond in time — is the plugin open in Figma?";
+      c.error = "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible (a minimized or backgrounded window throttles the plugin)?";
     }
   }
 }
@@ -951,7 +951,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       if (Date.now() - start > 25000) {
         c.status = "timeout";
-        c.error = "plugin did not respond in time — is the plugin open in Figma?";
+        c.error = "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible (a minimized or backgrounded window throttles the plugin)?";
         return { content: [{ type: "text", text: `Command timed out: ${c.error}` }] };
       }
       await new Promise((r) => setTimeout(r, 250));

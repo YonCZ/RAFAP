@@ -120,6 +120,13 @@ export function canonicalizeTextModel(node: unknown): void {
   const cso = Array.isArray(n.characterStyleOverrides) ? (n.characterStyleOverrides as number[]) : [];
   const chars = typeof n.characters === "string" ? (n.characters as string) : "";
 
+  // inheritFillStyleId/inheritTextStyleId stay scrubbed from the canonical
+  // text model even though both sides now emit them (Round 6, #21): REST
+  // never surfaces the DEFAULT range's binding (0 nodes carry inherit on
+  // the node-level style), so when the two sides pick different default
+  // ranges (the G4 typing-style deviation) the canonical bases cannot
+  // agree on inherit values — the comparison would measure the base-choice
+  // deviation, not the bindings. The byte diff tracks them fully.
   const scrub = (s: Record<string, any>): void => {
     delete s.inheritFillStyleId;
     delete s.inheritTextStyleId;

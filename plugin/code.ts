@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.4.0";
+const PLUGIN_VERSION = "3.5.1";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
@@ -259,10 +259,11 @@ figma.ui.onmessage = async (msg: any) => {
               }
               if (node.type === "TEXT") {
                 try {
-                  const segs = (node as any).getStyledTextSegments(["fillStyleId", "textStyleId"]);
+                  const segs = (node as any).getStyledTextSegments(["fillStyleId", "textStyleId", "hyperlink"]);
                   rec.textSegments = segs.map((s: any) => ({
                     fillStyleId: s.fillStyleId ?? null,
                     textStyleId: s.textStyleId ?? null,
+                    hyperlink: s.hyperlink ?? null,
                     characters: String(s.characters ?? "").slice(0, 24),
                   }));
                 } catch (e) {
@@ -581,7 +582,12 @@ interface ExtractionResult {
   styles: Record<string, unknown>;
 }
 
+// Timing accumulator — reset per extraction, reported under _figmaAgent
+// (dev diagnostics for slow extractions; stripped by the normalizer).
+const TIMINGS = { nodes: 0, serializeMs: 0, segmentsMs: 0, getStyleMs: 0, styleCalls: 0 };
+
 async function extractFramePayload(node: SceneNode): Promise<Record<string, unknown>> {
+  const t0 = Date.now();
   const { document, components, componentSets, styles } = await extractTree(node);
   return {
     id: node.id,
@@ -596,6 +602,7 @@ async function extractFramePayload(node: SceneNode): Promise<Record<string, unkn
       source: "plugin",
       extractedAt: new Date().toISOString(),
       pluginVersion: PLUGIN_VERSION,
+      timings: { ...TIMINGS, totalMs: Date.now() - t0 },
     },
   };
 }
@@ -654,6 +661,11 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
   const objByNode = new Map<BaseNode, Record<string, unknown>>();
   const stack: SceneNode[] = [root];
   let count = 0;
+  TIMINGS.nodes = 0;
+  TIMINGS.serializeMs = 0;
+  TIMINGS.segmentsMs = 0;
+  TIMINGS.getStyleMs = 0;
+  TIMINGS.styleCalls = 0;
 
   while (stack.length) {
     const node = stack.pop()!;
@@ -662,7 +674,10 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
     }
     let obj: Record<string, unknown>;
     try {
+      const _t0 = Date.now();
       obj = await serializeNode(node, ctx);
+      TIMINGS.serializeMs += Date.now() - _t0;
+      TIMINGS.nodes++;
     } catch (e) {
       // Resilience: one bad node must never kill the whole frame. Emit the
       // invariant core plus a visible marker under _figmaAgent (Rule B5).
@@ -1017,6 +1032,37 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
   // text nodes — characters + style + per-character overrides (agent.md §7.3.8)
   if (node.type === "TEXT") {
     Object.assign(out, serializeText(node as TextNode));
+    // Round 6 (#21) — register every range-bound style id in the file-level
+    // styles map (REST's map includes styles referenced only from rich-text
+    // ranges) and normalize entry values to the marker form, exactly like
+    // the node-level binding loop below.
+    const sot = out.styleOverrideTable as Record<string, Record<string, unknown>> | undefined;
+    if (sot) {
+      for (const entry of Object.values(sot)) {
+        for (const field of ["inheritFillStyleId", "inheritTextStyleId"] as const) {
+          const id = entry?.[field];
+          if (typeof id !== "string" || !id || styles[id]) continue;
+          try {
+            const _st0 = Date.now();
+            TIMINGS.styleCalls++;
+            const st = await figma.getStyleByIdAsync(id);
+            TIMINGS.getStyleMs += Date.now() - _st0;
+            if (!st) continue;
+            const nodeId = st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
+            styles[nodeId] = {
+              key: st.key,
+              name: st.name,
+              description: st.description ?? "",
+              remote: (st as any).remote === true,
+              styleType: restStyleType((st as any).type),
+            };
+            if (nodeId !== id) entry[field] = nodeId;
+          } catch {
+            /* style unresolvable — keep the raw id */
+          }
+        }
+      }
+    }
   }
 
   // components / instances
@@ -1094,7 +1140,10 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     for (const [field, id] of Object.entries(styleBindings as Record<string, string>)) {
       if (styles[id]) continue;
       try {
+        const _st0 = Date.now();
+        TIMINGS.styleCalls++;
         const st = await figma.getStyleByIdAsync(id);
+        TIMINGS.getStyleMs += Date.now() - _st0;
         if (st) {
           // plugin style ids look like "S:<hash>,<nodeId>" — for local
           // styles the suffix is the file-local node id REST emits. Remote
@@ -1207,6 +1256,7 @@ function serializeText(t: TextNode): Record<string, unknown> {
 
   let segments: SegmentInput[] = [];
   try {
+    const _seg0 = Date.now();
     const raw = t.getStyledTextSegments([
       "fontName",
       "fontSize",
@@ -1218,7 +1268,13 @@ function serializeText(t: TextNode): Record<string, unknown> {
       "textCase",
       "paragraphSpacing",
       "paragraphIndent",
+      // Round 6 (#21) — per-range bound style ids ARE exposed here (probed;
+      // the typings' claim "not exposed" was wrong). REST surfaces them as
+      // inheritFillStyleId/inheritTextStyleId on styleOverrideTable entries.
+      "fillStyleId",
+      "textStyleId",
     ]);
+    TIMINGS.segmentsMs += Date.now() - _seg0;
     segments = raw.map((s) => {
       const source: StyleSource = {
         fontFamily: s.fontName?.family,
@@ -1238,7 +1294,15 @@ function serializeText(t: TextNode): Record<string, unknown> {
         // segment styles carry fills — the override-table deltas keep them
         includeFills: true,
       };
-      return { start: s.start, end: s.end, style: buildTypeStyle(source) };
+      return {
+        start: s.start,
+        end: s.end,
+        style: buildTypeStyle(source),
+        // marker form ("S:<hash>,<nodeId>") — the bridge join renames to
+        // the library-side node id at persist time (deviation #10)
+        inheritFillStyleId: styleIdValue(s.fillStyleId) || undefined,
+        inheritTextStyleId: styleIdValue(s.textStyleId) || undefined,
+      };
     });
   } catch {
     /* fonts unavailable — fall back to node-level aggregate below */

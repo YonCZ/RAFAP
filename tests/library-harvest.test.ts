@@ -77,7 +77,17 @@ function consumerFrame(): any {
         {
           id: "180:306",
           type: "GROUP",
-          children: [{ id: "180:307", type: "TEXT", styles: { fill: "910:2", text: "500:1" } }],
+          children: [
+            {
+              id: "180:307",
+              type: "TEXT",
+              styles: { fill: "910:2", text: "500:1" },
+              styleOverrideTable: {
+                "1": { fontFamily: "Inter", inheritFillStyleId: "776:35", inheritTextStyleId: "910:2" },
+                "2": { fontFamily: "Inter", inheritFillStyleId: "500:1" },
+              },
+            },
+          ],
         },
       ],
     },
@@ -191,6 +201,12 @@ describe("rewriteFrameStyles", () => {
     // local + unresolved-remote bindings untouched
     expect(frame.document.children[1].children[0].styles.fill).toBe("910:2");
     expect(frame.document.children[1].children[0].styles.text).toBe("500:1");
+    // Round 6 (#21) — styleOverrideTable inherit fields join through the
+    // same table: remote marker → library id; local and unresolved stay put
+    const table = frame.document.children[1].children[0].styleOverrideTable;
+    expect(table["1"].inheritFillStyleId).toBe("36:572");
+    expect(table["1"].inheritTextStyleId).toBe("910:2");
+    expect(table["2"].inheritFillStyleId).toBe("500:1");
     expect(unresolved).toEqual([
       { key: "0000000000000000000000000000000000000000", name: "Not/Harvested", usedBy: ["180:307"] },
     ]);

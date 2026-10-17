@@ -227,6 +227,43 @@ describe("buildTextOverrides", () => {
     expect(empty.characterStyleOverrides).toEqual([]); // trailing zeros trimmed
   });
 
+  it("6b. range-bound style ids ride on the delta as inherit fields (Round 6, #21)", () => {
+    const bold = style({ fontWeight: 700 });
+    const r = buildTextOverrides("abcXYZ", [
+      { start: 0, end: 3, style: style({}) },
+      {
+        start: 3,
+        end: 6,
+        style: bold,
+        inheritFillStyleId: "S:hash,209:24",
+        inheritTextStyleId: "S:hash,109:75",
+      },
+    ]);
+    expect(r.styleOverrideTable["1"].inheritFillStyleId).toBe("S:hash,209:24");
+    expect(r.styleOverrideTable["1"].inheritTextStyleId).toBe("S:hash,109:75");
+    // the default range's binding is never emitted (REST-invisible)
+    const base = buildTextOverrides("abcXYZ", [
+      { start: 0, end: 3, style: style({}), inheritFillStyleId: "S:hash,209:141" },
+      { start: 3, end: 6, style: bold },
+    ]);
+    expect(base.styleOverrideTable["1"].inheritFillStyleId).toBeUndefined();
+    expect(base.style.inheritFillStyleId).toBeUndefined();
+    // identical deltas but distinct bindings never dedup onto one entry
+    const r2 = buildTextOverrides("abcXYZdef", [
+      { start: 0, end: 3, style: style({}) },
+      { start: 3, end: 6, style: bold, inheritFillStyleId: "S:hash,209:24" },
+      { start: 6, end: 9, style: bold, inheritFillStyleId: "S:hash,209:99" },
+    ]);
+    expect(Object.keys(r2.styleOverrideTable)).toHaveLength(2);
+    // a binding-only difference from the default stays cso 0 — the
+    // default's own binding is REST-invisible (corpus: no such range)
+    const r3 = buildTextOverrides("abcXYZ", [
+      { start: 0, end: 3, style: style({}) },
+      { start: 3, end: 6, style: style({}), inheritFillStyleId: "S:hash,209:24" },
+    ]);
+    expect(r3.styleOverrideTable).toEqual({});
+  });
+
   it("6. trailing zeros are trimmed (REST convention)", () => {
     const r = buildTextOverrides("aXYb", [
       { start: 0, end: 1, style: style({}) },

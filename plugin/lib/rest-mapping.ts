@@ -569,6 +569,16 @@ export interface SegmentInput {
   start: number; // inclusive, UTF-16 code units
   end: number; // exclusive
   style: Record<string, unknown>; // full TypeStyle of this range
+  /**
+   * Round 6 (#21) — the range's own bound style id (marker form, e.g.
+   * "S:<hash>,209:141"), when the segment carries one. REST emits these as
+   * `inheritFillStyleId`/`inheritTextStyleId` on the styleOverrideTable
+   * entry styling that range (measured: corpus 2/2 entries — the field is
+   * ABSOLUTE per range, never on the node-level default style). The bridge's
+   * join renames the marker to the library-side node id at persist time.
+   */
+  inheritFillStyleId?: string;
+  inheritTextStyleId?: string;
 }
 
 export interface TextOverrides {
@@ -627,6 +637,14 @@ export function buildTextOverrides(characters: string, segments: SegmentInput[])
   for (const seg of segments) {
     if (deepEqual(seg.style, defaultFull)) continue; // 0 = default
     const delta = styleDelta(defaultFull, seg.style);
+    // Round 6 (#21) — REST appends the range's own bound style ids to the
+    // entry (absolute, not a diff: the node-level default never carries
+    // them). Distinct bindings therefore never dedup onto one entry. Note:
+    // a range differing from the default ONLY by binding keeps cso 0 — the
+    // default's own (REST-invisible) binding is unknowable, and the corpus
+    // has no such range (every bound range differs in fills too).
+    if (seg.inheritFillStyleId !== undefined) delta.inheritFillStyleId = seg.inheritFillStyleId;
+    if (seg.inheritTextStyleId !== undefined) delta.inheritTextStyleId = seg.inheritTextStyleId;
     if (!Object.keys(delta).length) continue;
 
     // Dedup: identical deltas share one table entry.

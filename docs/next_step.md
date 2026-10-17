@@ -40,7 +40,7 @@
 | F1 | `layoutVersion` never emitted | G3 | 492 | mine → flag-gate | 5 |
 | F2 | `isFixed`/`scrollBehavior: FIXED` | G3 | 6 | experiment | 5 |
 | F3 | `rotation: 0` history, zeroed radii history | G3 | 18 | no — accept | 5 |
-| G1 | `textStyleId`/`hyperlink` not requested from `getStyledTextSegments` | probe | 2+ | probe | 6 |
+| G1 | ~~`textStyleId`/`hyperlink` not requested from `getStyledTextSegments`~~ **resolved: both style-id fields were exposed — emitted + joined (#21 retired); `hyperlink` corpus-empty** | probe | 2 | — | 6 |
 | H1–H9 | New spec-0.44.0 surfaces not mapped (GRID, min/max, PATTERN, progressive blur, …) | frontier | corpus-dependent | mine first | 6 |
 | I1 | No generic corpus rule-learning harness | tooling | — | build | 0 |
 | I2 | Report has no auto scorecard | tooling | — | build | 0 |
@@ -599,17 +599,57 @@ Either outcome is a win: 492 paths resolved or conclusively classified.
 
 ## Round 6 — Probes & spec-0.44.0 frontier
 
+> **STATUS: ✅ G1 + H corpus mine completed 2026-10-17.**
+> - **G1 `textStyleId`/`fillStyleId` (deviation #21 retired):** the "not
+>   exposed" premise was **false** — `getStyledTextSegments(["fillStyleId",
+>   "textStyleId"])` returns the per-range bound style ids (probed; the
+>   typings' claim was wrong). The plugin now emits
+>   `inheritFillStyleId`/`inheritTextStyleId` on the `styleOverrideTable`
+>   entry styling that range (absolute per range — the node-level default
+>   never carries them: 0 corpus nodes have inherit on `style`), registers
+>   range-bound styles in the file `styles` map, and the bridge join
+>   renames marker → library node id at persist time (same join as
+>   `node.styles`; corpus 2/2 nodes verified: 10:955/10:956, 10:877/10:947).
+>   The E2 canonicalizer **keeps** scrubbing inherit from the semantic
+>   model — REST never surfaces the *default* range's binding, so when the
+>   sides pick different default ranges (#20 typing style) the canonical
+>   bases cannot agree on inherit values; the byte diff tracks them fully.
+> - **G1 `hyperlink`:** exposed (accepted in the segment request, reads
+>   `null` when unset) — the corpus has **no hyperlinks**, so no mapping
+>   (rule: document, don't build).
+> - **H1–H10 corpus mine (offline, fixture):** every H-surface is **absent
+>   from the reference corpus** — `layoutMode` values are only
+>   HORIZONTAL/VERTICAL (no GRID), no `min*/max*`, no
+>   `counterAxisAlignContent`, no PATTERN paints, no `gifRef`, no
+>   progressive blur, no noise/texture, no `devStatus`/
+>   `explicitVariableModes`, no `textTruncation`/`maxLines`/`listSpacing`/
+>   `semantic*`, no TEXT_PATH nodes. Per the round rule: documented as
+>   "not present in reference corpus", nothing implemented.
+> - **Scorecard:** 1,123 byte / 786 semantic (was 1,125/786 — G4 340→338
+>   byte; semantic unchanged by design); file envelope 1,658/808 (was
+>   1,660/808). `npm run check` green, 96/96 tests; plugin 3.5.1 live.
+> - **Ops incident (root-caused):** "frame commands hanging for minutes"
+>   was webview suspension, not code — when Figma's window is on a
+>   non-active Space the plugin panel is throttled/suspended and queued
+>   commands drain in minute-scale bursts. Plugin 3.5.1 added
+>   `_figmaAgent.timings` (per-frame extraction phase timings, stripped by
+>   the normalizer) proving extraction is 200–1070ms per frame; the bridge
+>   timeout message now says to check the Figma window is visible. Keep
+>   Figma's window on the active Space during pulls.
+
 ### G1. Segment field probes (deviation #21 + hyperlink)
 
-**Solution.** One experimental plugin run adding fields to the `getStyledTextSegments` request in `serializeText`:
-- `"textStyleId"` — if exposed, emit `inheritTextStyleId` / `inheritFillStyleId` in override deltas (deviation #21, 2 entries) and sharpen B1's text-override detector.
-- `"hyperlink"` — `.spec/api_types.ts` `BaseTypeStyle.hyperlink?: Hyperlink` (`{type:'URL'|'NODE', url?, nodeID?}`); if exposed, map through `buildTypeStyle`.
-
-Cost: one publish cycle. If a field isn't exposed, the deviations entries stand.
+**Done (see STATUS above).** One experimental plugin run added
+`"fillStyleId"`/`"textStyleId"`/`"hyperlink"` to the `getStyledTextSegments`
+request: both style-id fields are exposed and are now emitted as
+`inherit*StyleId` on override-table entries (bridge-joined); `hyperlink`
+is exposed but corpus-empty (no mapping).
 
 ### H. New REST surfaces (mine the corpus before building any of these)
 
 Spec 0.44.0 surfaces RAFAP doesn't map yet. **Rule: mine `golden/file-<KEY>.rest.json` first; implement only what the corpus contains; otherwise document "not present in reference corpus".** None affect the current 2,354-path census.
+
+**Mine result (2026-10-17, offline against `file-pDLCZ.v2.rest.json`): all ten surfaces are absent from the reference corpus — H1–H10 remain documented, unimplemented.**
 
 | ID | Surface | Spec anchor (`.spec/api_types.ts`) | Mapping note |
 |---|---|---|---|
