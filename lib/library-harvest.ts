@@ -10,16 +10,23 @@
  * Harvest side: the plugin's `page-index` command now enumerates the local
  * styles of whatever file it runs in. Run inside a library file, that
  * enumeration IS the library's key→nodeId table; the bridge persists it as
- * `store/libraries/<fileKey>.json`. Because `figma.fileKey` is available in
- * the plugin sandbox, a library harvest is named by the library's real REST
- * file key.
+ * `store/libraries/<fileKey>.json` (plugin harvest — the tokenless/
+ * offline fallback).
  *
- * Consumer side: at persist time (saveFrame), remote style entries in the
- * frame's `styles` map are re-keyed from the marker id to the library node
- * id, and `node.styles` binding values are renamed to match. The consumer's
+ * Rest bootstrap (the default path): a REST file envelope's `styles` map is
+ * itself the complete join table (`{"36:572": {key: "bccec…", remote:
+ * true}}` — the map key is the library node id). One cached call per file
+ * (or a saved envelope fixture) mines it via `writeRestBootstrap`; the
+ * mapping is stable across file edits, so the cache rarely needs
+ * refreshing. This is the same one-time-bootstrap philosophy as
+ * `store/font-metrics.json` (Round 2).
+ *
+ * Consumer side: at persist time (saveFrame), style entries in the frame's
+ * `styles` map are re-keyed from the marker id to the join-table node id,
+ * and `node.styles` binding values are renamed to match. The consumer's
  * own metadata (name/description/styleType) is kept — REST reads the same
- * cached copy the consumer file stores — only the un-seeable nodeId comes
- * from the harvest.
+ * cached copy the consumer file stores — only the un-seeable node id comes
+ * from the join.
  *
  * Remote styles with no harvest entry are recorded in
  * `store/<fileKey>/unresolved-library-styles.json` so the operator knows
@@ -42,6 +49,8 @@ export interface LibraryHarvest {
   harvestedAt: string;
   /** 40-hex publish key → library-side style record. */
   styles: Record<string, HarvestedStyle>;
+  /** Provenance: "plugin-harvest" (run inside the file) or "rest-bootstrap". */
+  source?: string;
 }
 
 /** A remote style the bridge could not resolve — operator to-do item. */
@@ -80,8 +89,12 @@ export function writeLibraryHarvest(
   const styles: Record<string, HarvestedStyle> = {};
   // The plugin's styles map is nodeId-keyed; invert to the key-keyed join
   // table (the nodeId is the map key, the 40-hex publish key a field).
+  // Skip entries whose map key is not a real node id — current Figma
+  // reports local styles as "S:<hash>," (empty suffix); joining a
+  // placeholder id would rewrite consumer bindings to garbage.
   for (const [nodeId, entry] of Object.entries(stylesByNodeId ?? {})) {
     if (!entry?.key || !nodeId) continue;
+    if (nodeId.startsWith("S:")) continue; // placeholder id, not a REST node id
     styles[entry.key] = {
       nodeId,
       name: entry.name ?? "",
@@ -90,7 +103,12 @@ export function writeLibraryHarvest(
     };
   }
   if (!Object.keys(styles).length) return null;
-  const harvest: LibraryHarvest = { fileKey, harvestedAt: now.toISOString(), styles };
+  const harvest: LibraryHarvest = {
+    fileKey,
+    harvestedAt: now.toISOString(),
+    styles,
+    source: "plugin-harvest",
+  };
   fs.mkdirSync(librariesDir, { recursive: true });
   fs.writeFileSync(path.join(librariesDir, `${safeFileName(fileKey)}.json`), JSON.stringify(harvest, null, 2));
   return harvest;
@@ -117,10 +135,69 @@ export function loadLibraryIndex(librariesDir: string): Map<string, HarvestedSty
       continue; // corrupt file — skip, never block serving
     }
     for (const [key, style] of Object.entries(harvest?.styles ?? {})) {
-      if (style?.nodeId) index.set(key, style);
+      if (!style?.nodeId) continue;
+      // Defensive: placeholder ids ("S:<hash>," — current Figma reports local
+      // styles this way) must never enter the join table; they would rewrite
+      // consumer bindings to garbage. (Write-side guards exist too, but a
+      // file written by an older bridge or by hand must not poison serving.)
+      if (style.nodeId.startsWith("S:")) continue;
+      index.set(key, style);
     }
   }
   return index;
+}
+
+/**
+ * Mine the key→nodeId join table from a REST file envelope's `styles` map
+ * (`{"36:572": {key: "bccec…", remote: true, …}}` — the map key IS the
+ * library node id). This is the rest-bootstrap source: one cached call (or
+ * a saved envelope fixture) yields the complete mapping for every remote
+ * style a consumer file references; the plugin-harvest path remains as the
+ * tokenless/offline fallback.
+ */
+export function bootstrapFromRestStyles(
+  stylesMap: Record<string, any>,
+): Record<string, HarvestedStyle> {
+  const styles: Record<string, HarvestedStyle> = {};
+  for (const [nodeId, meta] of Object.entries(stylesMap ?? {})) {
+    const m = meta as PageIndexStyleEntry;
+    if (!nodeId || !m?.key) continue;
+    styles[m.key] = {
+      nodeId,
+      name: m.name ?? "",
+      description: m.description ?? "",
+      styleType: m.styleType ?? "",
+    };
+  }
+  return styles;
+}
+
+/** Persist a rest-bootstrap join table (mined from a REST envelope). */
+export function writeRestBootstrap(
+  librariesDir: string,
+  realFileKey: string,
+  stylesMap: Record<string, any>,
+  now = new Date(),
+): LibraryHarvest | null {
+  const styles = bootstrapFromRestStyles(stylesMap);
+  if (!Object.keys(styles).length) return null;
+  const harvest: LibraryHarvest = {
+    fileKey: realFileKey,
+    harvestedAt: now.toISOString(),
+    styles,
+    source: "rest-bootstrap",
+  };
+  fs.mkdirSync(librariesDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(librariesDir, `bootstrap_${safeFileName(realFileKey)}.json`),
+    JSON.stringify(harvest, null, 2),
+  );
+  return harvest;
+}
+
+/** Has a rest-bootstrap already been cached for this real file key? */
+export function hasRestBootstrap(librariesDir: string, realFileKey: string): boolean {
+  return fs.existsSync(path.join(librariesDir, `bootstrap_${safeFileName(realFileKey)}.json`));
 }
 
 /** Depth-first over every node object in a serialized document tree. */
@@ -143,33 +220,37 @@ export interface RewriteResult {
 }
 
 /**
- * Rewrite a stored frame in place (idempotent): re-key remote `styles` map
- * entries from consumer marker ids to library node ids and rename the
- * matching `node.styles` binding values. Local styles and unresolved remote
- * styles pass through untouched.
+ * Rewrite a stored frame in place (idempotent): re-key `styles` map entries
+ * whose 40-hex key has a join-table entry — remote entries (consumer marker
+ * id → library node id) and local entries alike (a rest-bootstrap table can
+ * repair degenerate plugin markers, e.g. the empty-string style id) — and
+ * rename the matching `node.styles` binding values. Entries with no join
+ * pass through untouched; remote misses are recorded for the unresolved
+ * report.
  */
 export function rewriteFrameStyles(frame: any, index: Map<string, HarvestedStyle>): RewriteResult {
   const styles = frame?.styles;
   if (!styles || typeof styles !== "object") return { resolved: 0, unresolved: [] };
 
-  // Pass 1 — styles map: marker id → library node id for harvested remotes.
-  const rename = new Map<string, string>(); // markerId → library nodeId
+  // Pass 1 — styles map: marker id → join-table node id.
+  const rename = new Map<string, string>(); // markerId → resolved node id
   const unresolvedByMarker = new Map<string, UnresolvedStyle>(); // markerId → entry
   const rewritten: Record<string, unknown> = {};
   let resolved = 0;
   for (const [markerId, raw] of Object.entries(styles)) {
     const meta = raw as PageIndexStyleEntry;
-    if (meta?.remote === true && typeof meta.key === "string") {
-      const lib = index.get(meta.key);
-      if (lib) {
-        // Keep the consumer's cached metadata (REST reads the same copy);
-        // only the node id is un-seeable from the consumer file.
-        rewritten[lib.nodeId] = meta;
-        rename.set(markerId, lib.nodeId);
-        resolved++;
-        continue;
-      }
-      unresolvedByMarker.set(markerId, { key: meta.key, name: meta.name ?? "", usedBy: [] });
+    const key = typeof meta?.key === "string" ? meta.key : undefined;
+    const lib = key ? index.get(key) : undefined;
+    if (lib) {
+      // Keep the consumer's cached metadata (REST reads the same copy);
+      // only the node id is un-seeable from the consumer file.
+      rewritten[lib.nodeId] = meta;
+      rename.set(markerId, lib.nodeId);
+      if (meta?.remote === true) resolved++;
+      continue;
+    }
+    if (meta?.remote === true && key) {
+      unresolvedByMarker.set(markerId, { key, name: meta.name ?? "", usedBy: [] });
     }
     rewritten[markerId] = meta; // local or unresolved-remote: unchanged
   }

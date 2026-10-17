@@ -150,7 +150,7 @@ figma.ui.onmessage = async (msg: any) => {
               ? { id: main.id, name: main.name, remote: !!main.remote, subtree: dump(main) }
               : null,
           };
-        } else {
+        } else if (Array.isArray(params.ids) && params.ids.length > 0) {
           const probes: any[] = [];
           for (const id of (params.ids ?? []) as string[]) {
             try {
@@ -199,6 +199,44 @@ figma.ui.onmessage = async (msg: any) => {
             }
           }
           payload = { probes };
+        } else if (params.styles === true) {
+          // Round 4 diagnostics: raw local-style enumeration, sync vs async
+          // getters side by side — settles how style ids really look (two
+          // files reported a single style with an empty id marker).
+          const dump: Record<string, any> = {};
+          const getterPairs: [string, string, string][] = [
+            ["paint", "getLocalPaintStyles", "getLocalPaintStylesAsync"],
+            ["text", "getLocalTextStyles", "getLocalTextStylesAsync"],
+            ["effect", "getLocalEffectStyles", "getLocalEffectStylesAsync"],
+            ["grid", "getLocalGridStyles", "getLocalGridStylesAsync"],
+          ];
+          const brief = (s: any) => ({
+            id: s?.id ?? null,
+            key: s?.key ?? null,
+            name: s?.name ?? null,
+            remote: s?.remote === true,
+          });
+          for (const [label, syncName, asyncName] of getterPairs) {
+            const entry: Record<string, any> = {};
+            try {
+              const sync = (figma as any)[syncName]?.();
+              entry.sync = Array.isArray(sync)
+                ? { count: sync.length, styles: sync.map(brief) }
+                : String(sync);
+            } catch (e) {
+              entry.syncError = (e as Error).message;
+            }
+            try {
+              const async = await (figma as any)[asyncName]?.();
+              entry.async = Array.isArray(async)
+                ? { count: async.length, styles: async.map(brief) }
+                : String(async);
+            } catch (e) {
+              entry.asyncError = (e as Error).message;
+            }
+            dump[label] = entry;
+          }
+          payload = { fileKey: await effectiveFileKey(), styles: dump };
         }
       } else {
         throw new Error(`unknown command type: ${commandType}`);
@@ -413,7 +451,11 @@ async function extractFramePayload(node: SceneNode): Promise<Record<string, unkn
 
 // Local styles (even unused ones) belong in the file-level `styles` map —
 // REST includes them all. Ids are "S:<hash>,<nodeId>" — the suffix is the
-// file-local node id REST keys the map by.
+// file-local node id REST keys the map by. Current Figma builds report
+// LOCAL styles as "S:<hash>," with an EMPTY suffix (remote styles still
+// carry real markers via node *StyleId properties): key those by the full
+// id instead, so distinct styles never collapse onto "". The bridge's
+// rest-bootstrap join (Round 4) re-keys them to REST's real node ids.
 async function enumerateLocalStyles(styles: Record<string, unknown>): Promise<void> {
   try {
     const lists = await Promise.all([
@@ -425,15 +467,16 @@ async function enumerateLocalStyles(styles: Record<string, unknown>): Promise<vo
     for (const list of lists) {
       if (!Array.isArray(list)) continue;
       for (const st of list as any[]) {
-        const nodeId =
-          typeof st.id === "string" && st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
+        if (typeof st.id !== "string" || !st.id) continue;
+        const suffix = st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
+        const nodeId = suffix || st.id; // empty suffix → full id (no collapse)
         if (styles[nodeId]) continue;
         styles[nodeId] = {
           key: st.key,
           name: st.name,
           description: st.description ?? "",
           remote: st.remote === true,
-          styleType: st.type,
+          styleType: restStyleType(st.type),
         };
       }
     }
@@ -518,6 +561,14 @@ const TYPE_MAP: Record<string, string> = {
 
 function restNodeType(pluginType: string): string {
   return TYPE_MAP[pluginType] ?? pluginType; // B4: unknown types pass through
+}
+
+/**
+ * REST StyleType vocabulary: the plugin's BaseStyle.type says "PAINT" where
+ * REST's style metadata says "FILL" (others — TEXT, EFFECT, GRID — agree).
+ */
+function restStyleType(pluginType: string): string {
+  return pluginType === "PAINT" ? "FILL" : pluginType;
 }
 
 function absoluteBox(node: SceneNode): Record<string, number> | undefined {
@@ -870,7 +921,7 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
             name: st.name,
             description: st.description ?? "",
             remote: (st as any).remote === true,
-            styleType: (st as any).type, // BaseStyle.type: 'PAINT' | 'TEXT' | 'EFFECT' | 'GRID' | …
+            styleType: restStyleType((st as any).type), // BaseStyle.type: 'PAINT' | 'TEXT' | 'EFFECT' | 'GRID' | …
           };
           (styleBindings as Record<string, string>)[field] = nodeId;
         }

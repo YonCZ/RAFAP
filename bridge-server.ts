@@ -31,6 +31,7 @@
 import express from "express";
 import cors from "cors";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -46,9 +47,11 @@ import {
 import { parseFontMetricsTable, rewriteFontMetrics } from "./lib/font-metrics.js";
 import {
   collectUnresolvedStyles,
+  hasRestBootstrap,
   loadLibraryIndex,
   rewriteFrameStyles,
   writeLibraryHarvest,
+  writeRestBootstrap,
 } from "./lib/library-harvest.js";
 
 const HOST = process.env.BRIDGE_HOST ?? "127.0.0.1"; // numeric literal — never '0.0.0.0'
@@ -353,7 +356,72 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
  * top-level frame, max 3 in flight — partial progress survives a plugin
  * reload because each frame persists as it lands.
  */
+/**
+ * Round 4 (G1) — resolve the real REST file key for a local store key.
+ * Dev plugin sessions have no figma.fileKey (store keys are `local-*`
+ * fallbacks); `store/file-key-aliases.json` maps them to the real key.
+ * Non-local store keys are already real keys.
+ */
+function realFileKey(localKey: string): string | null {
+  try {
+    const aliases = JSON.parse(
+      fs.readFileSync(path.join(STORE_DIR, "file-key-aliases.json"), "utf8"),
+    );
+    const mapped = aliases?.[localKey];
+    if (typeof mapped === "string" && mapped) return mapped;
+  } catch {
+    /* no alias table */
+  }
+  return localKey.startsWith("local-") ? null : localKey;
+}
+
+/**
+ * Round 4 (G1) — rest-bootstrap the style-id join table, once per file.
+ * A REST file envelope's `styles` map IS the join (map key = library node
+ * id, field key = 40-hex publish key). One cached call per real file key
+ * (`store/libraries/bootstrap_<key>.json`); failures never break the pull
+ * (tokenless setups fall back to the plugin harvest / unresolved report).
+ */
+async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
+  const realKey = realFileKey(localKey);
+  if (!realKey) return;
+  if (hasRestBootstrap(LIBRARIES_DIR, realKey)) return;
+  let token = process.env.FIGMA_TOKEN;
+  if (!token) {
+    try {
+      token = fs.readFileSync(path.join(os.homedir(), ".figma-token"), "utf8").trim();
+    } catch {
+      /* no token — harvest/unresolved path */
+    }
+  }
+  if (!token) return;
+  try {
+    const res = await fetch(`https://api.figma.com/v1/files/${realKey}?depth=1`, {
+      headers: { "X-Figma-Token": token },
+    });
+    if (res.status === 429) {
+      console.log("[bridge] rest-bootstrap skipped: rate-limited (429) — harvest/unresolved path stays active");
+      return;
+    }
+    if (!res.ok) {
+      console.log(`[bridge] rest-bootstrap skipped: Figma API ${res.status}`);
+      return;
+    }
+    const env = (await res.json()) as { styles?: Record<string, any> };
+    const harvest = writeRestBootstrap(LIBRARIES_DIR, realKey, env.styles ?? {});
+    if (harvest) {
+      LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+      console.log(
+        `[bridge] rest-bootstrap: ${realKey} — ${Object.keys(harvest.styles).length} style ids joined`,
+      );
+    }
+  } catch (e) {
+    console.log(`[bridge] rest-bootstrap failed (offline?): ${String(e)}`);
+  }
+}
+
 async function freshPull(fileKey: string): Promise<void> {
+  await autoBootstrapLibraryStyles(fileKey);
   const idx = await runCommand("page-index", {});
   if (idx?.fileKey && safeId(idx.fileKey) !== safeId(fileKey)) {
     throw new BridgeError(409, `plugin is in a different file (${idx.fileKey}) than requested (${fileKey})`);
@@ -734,6 +802,11 @@ app.get("/api/dev/probe", async (req, res) => {
   try {
     if (req.query.instanceId) {
       const result = await runCommand("probe", { instanceId: String(req.query.instanceId) });
+      res.json(result);
+      return;
+    }
+    if (req.query.styles !== undefined) {
+      const result = await runCommand("probe", { styles: true });
       res.json(result);
       return;
     }

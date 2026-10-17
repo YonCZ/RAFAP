@@ -8,9 +8,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
   collectUnresolvedStyles,
+  hasRestBootstrap,
   loadLibraryIndex,
   rewriteFrameStyles,
   writeLibraryHarvest,
+  writeRestBootstrap,
 } from "../lib/library-harvest.js";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "rafap-libharvest-"));
@@ -134,6 +136,36 @@ describe("loadLibraryIndex", () => {
     writeLibraryHarvest(TMP, "lib-a", LIBRARY_STYLES);
     expect(loadLibraryIndex(TMP).size).toBe(2);
   });
+
+  it("never loads placeholder node ids into the join table", () => {
+    // a poisoned harvest (written before the S:-guard) must not enter the
+    // index even though the file exists on disk
+    fs.writeFileSync(
+      path.join(TMP, "poisoned.json"),
+      JSON.stringify({
+        fileKey: "poisoned",
+        harvestedAt: "2026-10-17T00:00:00.000Z",
+        styles: {
+          "6bf7658826803110607706d89878a6cdc8503c93": {
+            nodeId: "S:6bf7658826803110607706d89878a6cdc8503c93,",
+            name: "Purple-main",
+            description: "",
+            styleType: "PAINT",
+          },
+          abababababababababababababababababababab: {
+            nodeId: "",
+            name: "empty",
+            description: "",
+            styleType: "FILL",
+          },
+        },
+      }),
+    );
+    writeLibraryHarvest(TMP, "lib-a", LIBRARY_STYLES);
+    const index = loadLibraryIndex(TMP);
+    expect(index.size).toBe(2); // only the two legit entries
+    expect(index.has("6bf7658826803110607706d89878a6cdc8503c93")).toBe(false);
+  });
 });
 
 describe("rewriteFrameStyles", () => {
@@ -210,6 +242,76 @@ describe("rewriteFrameStyles", () => {
     expect(unresolved).toEqual([
       { key: "0000000000000000000000000000000000000000", name: "Not/Harvested", usedBy: ["9:10"] },
     ]);
+  });
+});
+
+describe("rest bootstrap", () => {
+  const REST_ENVELOPE_STYLES = {
+    "36:572": {
+      key: "bccec8610eaa78b9e79480f8026fa2f055cd2b52",
+      name: "Icon/Icon Grid",
+      styleType: "GRID",
+      remote: true,
+      description: "",
+    },
+    "67:659": {
+      key: "6bf7658826803110607706d89878a6cdc8503c93",
+      name: "Purple-main",
+      styleType: "FILL",
+      remote: false,
+      description: "",
+    },
+  };
+
+  it("writeRestBootstrap mines the join from a REST envelope styles map", () => {
+    const harvest = writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    expect(harvest).not.toBeNull();
+    expect(harvest!.source).toBe("rest-bootstrap");
+    expect(harvest!.styles["bccec8610eaa78b9e79480f8026fa2f055cd2b52"]).toEqual({
+      nodeId: "36:572",
+      name: "Icon/Icon Grid",
+      description: "",
+      styleType: "GRID",
+    });
+    expect(fs.existsSync(path.join(TMP, "bootstrap_real-key-1.json"))).toBe(true);
+  });
+
+  it("hasRestBootstrap detects the cache; degenerate entries are skipped", () => {
+    expect(hasRestBootstrap(TMP, "real-key-1")).toBe(false);
+    writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    expect(hasRestBootstrap(TMP, "real-key-1")).toBe(true);
+    const harvest = writeRestBootstrap(TMP, "real-key-2", {
+      "": { key: "ab".repeat(20), name: "no node id", styleType: "FILL" },
+      "1:1": { key: "", name: "no publish key", styleType: "FILL" },
+    });
+    expect(harvest).toBeNull();
+  });
+
+  it("the rewrite repairs degenerate local markers via the bootstrap join", () => {
+    writeRestBootstrap(TMP, "real-key-1", REST_ENVELOPE_STYLES);
+    const frame = {
+      // live plugin emission: Purple-main's marker is the empty string
+      styles: {
+        "": {
+          key: "6bf7658826803110607706d89878a6cdc8503c93",
+          name: "Purple-main",
+          description: "",
+          remote: false,
+          styleType: "PAINT",
+        },
+      },
+      document: {
+        id: "5:1",
+        type: "FRAME",
+        children: [{ id: "5:2", type: "RECTANGLE", styles: { fill: "" } }],
+      },
+    };
+    const { resolved, unresolved } = rewriteFrameStyles(frame as any, loadLibraryIndex(TMP));
+    expect(resolved).toBe(0); // local — not counted as remote resolution
+    expect(unresolved).toEqual([]);
+    expect((frame.styles as any)["67:659"]).toBeDefined();
+    expect((frame.styles as any)[""]).toBeUndefined();
+    expect((frame.document as any).children[0].styles.fill).toBe("67:659");
   });
 });
 

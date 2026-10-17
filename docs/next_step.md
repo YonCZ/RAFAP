@@ -477,45 +477,45 @@ Unresolved keys accumulate to `store/unresolved-library-styles.json` — a self-
 **Files:** `plugin/code.ts`, `bridge-server.ts` (store + load), `lib/stitch.ts` (verify), deviations doc (#10 → retired per harvested library).
 **Acceptance:** 643 paths → 0 for each harvested library; unresolved report empty after the operator harvests all referenced libraries.
 
-> **STATUS: 🔨 machinery built 2026-10-17 — awaiting operator harvest.**
-> `npm run check` green, 87/87 tests (10 new in `tests/library-harvest.test.ts`);
-> plugin published + dev bridge restarted with the new code.
-> Implementation deltas from the plan above (all deliberate):
-> - **Harvest folded into `page-index`** (no separate command): the plugin's
->   page-index now enumerates the local styles of whatever file it runs in.
->   Running the plugin inside a library file and pulling page-index IS the
->   harvest — no new command routing, no extra UI.
-> - **Rewrite is bridge-side, not in `serializeNode`:** the plugin keeps
->   emitting marker ids + the 40-hex `key` (it already did); the bridge
->   rewrites at persist time (`saveFrame` → `lib/library-harvest.ts`,
->   right after the Round 2 font-metrics rewriter). No publish cycle per
->   library; `stitch.ts` needed no changes (aggregation picks the rewritten
->   per-frame maps up automatically).
-> - **Consumer metadata is kept, only the nodeId comes from the harvest:**
->   REST reads the same cached library copy the consumer file stores, so
->   the consumer's own name/description/styleType are the right values —
->   only the node id is un-seeable from the consumer side.
-> - **Harvest files are snapshots** (`store/libraries/<fileKey>.json`,
->   replace-per-file) merged into one join table at load; corrupt files
->   are skipped, never blocking serving.
-> - **Unresolved report:** `store/<fileKey>/unresolved-library-styles.json`,
->   rebuilt on every frame save — key, style name, usedBy node ids.
->   Verified live: 22 unresolved + 1 resolved = exactly the 23 remote
->   styles the corpus knows about.
-> - **End-to-end verified with the one corpus-proven join** (Icon/Icon Grid,
->   key `bccec861…` → `36:572`): a synthetic harvest rewrote live frame
->   147:348's grid binding and styles-map key to `36:572`; state restored
->   afterwards (synthetic harvest deleted, frame re-pulled to `776:35`).
-> **Live-file observations (both feed the staleness re-fetch):** DevBoard
-> today has **1 local style** (Purple-main) vs 19 in the Oct-15 fixtures,
-> and Purple-main's plugin marker is an **empty string** (`"S:<40hex>,"`
->   from both `getLocalPaintStylesAsync` and `getStyleByIdAsync`) — its
->   live REST key is unknown; the Oct-15 fixtures say `67:659`.
-> **Remaining for the operator:** open the library file in Figma, run the
-> dev plugin there, then trigger a page-index (any `?fresh=1` or
-> `POST /api/agent/commands {"type":"page-index"}` — the plugin must be
-> the only one connected, or it may answer from the wrong file), then
-> re-pull DevBoard and re-run the scorecard. Acceptance as above.
+> **STATUS: ✅ completed 2026-10-17 — G1 649 → 6 paths.**
+> **Scorecard: 1,131 byte / 792 semantic paths — byte parity 98.882%,
+> semantic parity 99.217%** (from 1,774/1,435, 98.246%/98.582%).
+> G1: 649 → 6 (D4 residue); unresolved report **empty**; the file
+> envelope's `styles` map is **byte-identical to REST (42/42)**.
+> `npm run check` green, 91/91 tests; plugin published + dev bridge
+> restarted. Resolution path changed mid-round — the decisive findings:
+> - **Current Figma reports local styles with empty id markers**
+>   (`"S:<40hex>,"` — probe-verified on two files via the new
+>   `?styles=1` probe mode, sync + async getters, legacy *and*
+>   dynamic-page document access; node `*StyleId` properties still
+>   return real markers). Consequences: (a) the planned operator
+>   harvest-of-a-library-file **cannot work** — the plugin cannot see
+>   local style node ids, period; (b) DevBoard's "1 local style" was an
+>   **enumeration collapse bug** (every local style keyed the map under
+>   `""`, last write wins) — the file still has its 19.
+> - **Rest-bootstrap join (the resolution, and the "easy as real API"
+>   answer):** a REST file envelope's `styles` map is itself the complete
+>   key→nodeId join table. `tools/bootstrap-library-styles.ts` mines it
+>   from a saved envelope (zero API calls — the Oct-15 fixture
+>   bootstrapped DevBoard); the bridge **auto-bootstraps on fresh pull**
+>   when the token + `store/file-key-aliases.json` alias exist (one
+>   cached call per file, 429/offline-safe skip). Same one-time-bootstrap
+>   philosophy as `store/font-metrics.json`. The rewrite at persist time
+>   (`lib/library-harvest.ts`) re-keys `styles` map entries — remote
+>   **and** local — and renames `node.styles` bindings; consumer
+>   metadata is kept (REST reads the same cached copy).
+> - **Plugin fixes:** enumeration keys placeholder-suffix styles by their
+>   full id (no collapse — 84 distinct styles appeared in a test file
+>   where 1 showed before); `styleType` vocabulary mapped (`PAINT` →
+>   REST's `FILL`, `restStyleType`). Deviations #39/#40 record both.
+> - **Hardening:** placeholder ids are rejected by the join table at
+>   write **and** load time (a poisoned-index incident during
+>   development — a pre-guard harvest overrode the bootstrap — proved
+>   both guards necessary).
+> - **Remaining 6 paths = D4:** one prototype transition
+>   (`transitionNodeID` → `10:1098`, library-side frame) on frame
+>   180:324; deviation #16. Optional closure: node-level transition LUT
+>   mined from the same rest-bootstrap envelope.
 
 ### D4. Library prototype transitions (3 paths)
 

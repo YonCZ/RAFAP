@@ -27,7 +27,7 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 7 | `layoutVersion` never emitted | ~492 paths | The plugin API exposes no layout version counter. Purely informational in REST. |
 | 8 | Instance `overrides` arrays not emitted | ~146 | The plugin has no override table for instance children. |
 | 9 | `fillOverrideTable` not emitted | ~130 | Not exposed by the plugin API. |
-| 10 | **Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`) | ~590 | The plugin cannot see ids inside the defining library file. The `key` field (40-hex hash) in the styles metadata **does match REST exactly**, so consumers can correlate bindings ↔ styles by key. Local styles are byte-exact. **Round 4 machinery built** (library harvest — see *Library style ids* below); retire per harvested library. |
+| 10 | ~~**Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`)~~ **Retired (Round 4):** rest-bootstrap join re-keys both to the library node id at persist time | ~~649~~ 6 | The plugin cannot see ids inside the defining library file — but a REST file envelope's `styles` map **is** the key→nodeId join table. One cached call per file (or a saved envelope fixture) mines it; frames are rewritten on persist (`lib/library-harvest.ts`). The bridge auto-bootstraps on fresh pull when the token + `store/file-key-aliases.json` are present (429/offline-safe). Residue: D4 prototype transitions (see *Library style ids* below). |
 | 11 | Inherited properties on instance children omitted — style bindings (plugin returns `""`) and `SCALE`/`SCALE` constraints (plugin returns the MIXED sentinel) | 3 nodes + 26 paths | Would require resolving the main component's corresponding child node (the `;`-suffix in instance child ids encodes the original node id). Future work. |
 | 12 | `scrollBehavior` always `"SCROLLS"`; `isFixed` never emitted | 3 nodes | The plugin API has no pinned-frame detection. |
 | 13 | ~~`fontPostScriptName` always `null`~~ **Retired (Round 2):** bridge-side corpus table emits the 5 (family, style) combos REST names | ~~38~~ 0 | The rule is `Family-Style` (spaces stripped), but REST only has server-side names for some combos — Inter is null except `Inter/Medium` in the corpus. Presence is tabulated in `store/font-metrics.json` (build: `tools/build-font-metrics.ts`), not derived. On `styleOverrideTable` entries REST emits it (name or null) exactly when `fontFamily` is in the delta (34/34 corpus entries). |
@@ -91,6 +91,13 @@ Each per-node item notes the measured impact on the DevBoard reference file
 |---|---|---|
 | 37 | INSTANCE `overrides` are emitted by **live-diffing each instance against its main component**; REST reports Figma's **stored user-edit records**. Exact where the main hasn't drifted (local mains: 96/97 arrays match, 77/77 empty arrays match), but remote (library) mains drift after insertion — renamed mains fire false `name`, edited/updated mains leave stale subtree ids that break correspondence (missing entries), and overrides absorbed by library updates disappear (REST fires, live values now match). Remote-main arrays match 1/49. | The plugin API exposes no override records; a live diff is the only derivable semantics. Suppression rules were measured and rejected: REST genuinely fires `name` (×16) and self `width`/`height` (×33) on remote-main instances, so remote-only suppression loses more true positives than it removes noise. |
 | 38 | `fillOverrideTable` is never emitted | The emission rule is underivable: all 130 corpus values are `{"1": null}` (5 vectors have 3 slots); presence is uncorrelated with `vectorNetwork` regions (53 with-table vectors report 0 regions, 21 without-table report 1), segment/vertex counts, fills, strokes, or any REST-visible feature (probed all 130 + 40 controls). Same discipline as `layoutVersion` (F1): no rule without a ≥99% corpus fit. ~130 paths of residue. |
+
+## Library style ids (Round 4)
+
+| # | Deviation | Rationale |
+|---|---|---|
+| 39 | Local style ids: current Figma reports **every local style** to plugins as `"S:<40-hex key>,"` — an **empty node-id suffix** (probe-verified via the `?styles=1` probe on two files, sync + async getters, legacy and dynamic-page document access). REST keys the file-level `styles` map by real node ids (e.g. `67:659`). Node *StyleId properties still return real markers, so bound styles are unaffected — only the enumeration. | The plugin API cannot see local style node ids, period. The enumeration keys placeholder-suffix entries by their full id (no collapse); the rest-bootstrap join (#10) re-keys them to REST's ids at persist time. Without a bootstrap table, a file's local styles appear under `S:<key>,` placeholder keys — a visible, self-describing degradation. |
+| 40 | Bridge `styleType` vocabulary: plugin `BaseStyle.type` says `PAINT` where REST style metadata says `FILL` (TEXT/EFFECT/GRID agree) | Mapped via `restStyleType` in the plugin (Round 4). |
 
 ## Text metrics (Round 2)
 
@@ -157,34 +164,42 @@ separate numbers; the scorecard table shows both per root cause.
 - 2 instance-`overrides` id shifts (frame 237:221): remote-main drift, the
   #37 family.
 
-## Library style ids (Round 4 — machinery in place, harvest pending)
+## Library style ids (Round 4 — resolved via rest-bootstrap)
 
-Deviation #10's resolution is built and verified end-to-end on the one
-corpus-proven join, but is **not yet reflected in the scorecard** until the
-operator runs the plugin inside the defining library file.
+Deviation #10 closed by the rest-bootstrap join; **G1 649 → 6 paths**, the
+unresolved report is empty, and the file envelope's `styles` map is
+byte-identical to REST (42/42 entries).
 
-- **Join:** the 40-hex publish `key` is identical from both sides. The
-  plugin's `page-index` now carries the local styles of whatever file it
-  runs in; run inside a library, that is the key→nodeId table. The bridge
-  persists it as `store/libraries/<fileKey>.json` (snapshot per file,
-  merged into one join table at load) and rewrites consumer frames at
-  persist time (`lib/library-harvest.ts`, after the font-metrics rewriter):
-  remote `styles` map entries re-key from the consumer marker id to the
-  library node id, `node.styles` binding values follow, consumer-side
-  metadata is kept (REST reads the same cached copy).
+- **Join:** the 40-hex publish `key` is identical from both sides. A REST
+  file envelope's `styles` map is itself the complete key→nodeId table
+  (map key = library node id, field key = publish key). One cached call per
+  file — `store/libraries/bootstrap_<realKey>.json`, mined by
+  `tools/bootstrap-library-styles.ts` from a saved envelope, or fetched
+  live by the bridge on fresh pull (token + `store/file-key-aliases.json`
+  alias; skipped on 429/offline; same one-time-bootstrap philosophy as
+  `store/font-metrics.json`). Frames are rewritten at persist time
+  (`lib/library-harvest.ts`, after the font-metrics rewriter): `styles`
+  map entries re-key to the join-table node id — remote **and** local —
+  `node.styles` binding values follow, consumer-side metadata is kept
+  (REST reads the same cached copy).
+- **Plugin harvest (fallback, now known-limited):** running the plugin
+  inside a library file and pulling `page-index` persists
+  `store/libraries/<fileKey>.json`. Probe-verified limitation (#39):
+  current Figma reports local styles with **empty id markers**, so a
+  harvest cannot actually see node ids — the rest-bootstrap is the
+  reliable path. Guards skip placeholder ids at write **and** load time
+  (a poisoned-index incident during development hardened both).
 - **Unresolved report:** `store/<fileKey>/unresolved-library-styles.json`
-  (key, name, usedBy node ids) rebuilds on every frame save — the operator
-  to-do list of libraries still needing a harvest run.
-- **Verified live:** synthetic harvest `bccec861… → 36:572` (Icon/Icon Grid)
-  rewrote frame 147:348's binding + map key; 22 remaining remote styles
-  appeared in the report; state restored. Full scorecard impact lands
-  after the real harvest + re-pull.
-- **New open observation (staleness family):** DevBoard today has 1 local
-  style vs 19 in the Oct-15 fixtures, and that style (Purple-main) reports
-  an **empty plugin marker** (`"S:<40hex>,"` from both
-  `getLocalPaintStylesAsync` and `getStyleByIdAsync`; Oct-15 REST keyed it
-  `67:659`). Its live REST key is unknown — settle with the same re-fetch
-  that covers the `exportSettings` staleness check.
+  (key, name, usedBy node ids) rebuilds on every frame save — the
+  operator to-do list of libraries still needing a bootstrap.
+- **The "1 local style" mystery** was an enumeration collapse bug, not
+  file history: all local styles keyed the map under `""`, the last one
+  winning. Fixed (full-id keying); DevBoard's 19 local styles reappeared
+  and all joined to their REST ids (`67:659` etc.).
+- **Residue — 6 paths (D4):** one prototype transition
+  (`transitionDuration`/`Easing`/`NodeID` → `10:1098`, a library-side
+  frame) on frame 180:324; deviation #16. Optional closure: a node-level
+  transition LUT mined from the same rest-bootstrap envelope.
 
 ## Closed questions (experiments recorded)
 
