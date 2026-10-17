@@ -477,6 +477,46 @@ Unresolved keys accumulate to `store/unresolved-library-styles.json` — a self-
 **Files:** `plugin/code.ts`, `bridge-server.ts` (store + load), `lib/stitch.ts` (verify), deviations doc (#10 → retired per harvested library).
 **Acceptance:** 643 paths → 0 for each harvested library; unresolved report empty after the operator harvests all referenced libraries.
 
+> **STATUS: 🔨 machinery built 2026-10-17 — awaiting operator harvest.**
+> `npm run check` green, 87/87 tests (10 new in `tests/library-harvest.test.ts`);
+> plugin published + dev bridge restarted with the new code.
+> Implementation deltas from the plan above (all deliberate):
+> - **Harvest folded into `page-index`** (no separate command): the plugin's
+>   page-index now enumerates the local styles of whatever file it runs in.
+>   Running the plugin inside a library file and pulling page-index IS the
+>   harvest — no new command routing, no extra UI.
+> - **Rewrite is bridge-side, not in `serializeNode`:** the plugin keeps
+>   emitting marker ids + the 40-hex `key` (it already did); the bridge
+>   rewrites at persist time (`saveFrame` → `lib/library-harvest.ts`,
+>   right after the Round 2 font-metrics rewriter). No publish cycle per
+>   library; `stitch.ts` needed no changes (aggregation picks the rewritten
+>   per-frame maps up automatically).
+> - **Consumer metadata is kept, only the nodeId comes from the harvest:**
+>   REST reads the same cached library copy the consumer file stores, so
+>   the consumer's own name/description/styleType are the right values —
+>   only the node id is un-seeable from the consumer side.
+> - **Harvest files are snapshots** (`store/libraries/<fileKey>.json`,
+>   replace-per-file) merged into one join table at load; corrupt files
+>   are skipped, never blocking serving.
+> - **Unresolved report:** `store/<fileKey>/unresolved-library-styles.json`,
+>   rebuilt on every frame save — key, style name, usedBy node ids.
+>   Verified live: 22 unresolved + 1 resolved = exactly the 23 remote
+>   styles the corpus knows about.
+> - **End-to-end verified with the one corpus-proven join** (Icon/Icon Grid,
+>   key `bccec861…` → `36:572`): a synthetic harvest rewrote live frame
+>   147:348's grid binding and styles-map key to `36:572`; state restored
+>   afterwards (synthetic harvest deleted, frame re-pulled to `776:35`).
+> **Live-file observations (both feed the staleness re-fetch):** DevBoard
+> today has **1 local style** (Purple-main) vs 19 in the Oct-15 fixtures,
+> and Purple-main's plugin marker is an **empty string** (`"S:<40hex>,"`
+>   from both `getLocalPaintStylesAsync` and `getStyleByIdAsync`) — its
+>   live REST key is unknown; the Oct-15 fixtures say `67:659`.
+> **Remaining for the operator:** open the library file in Figma, run the
+> dev plugin there, then trigger a page-index (any `?fresh=1` or
+> `POST /api/agent/commands {"type":"page-index"}` — the plugin must be
+> the only one connected, or it may answer from the wrong file), then
+> re-pull DevBoard and re-run the scorecard. Acceptance as above.
+
 ### D4. Library prototype transitions (3 paths)
 
 **Solution (optional, cheap).** If the operator harvests the library's full page-index/frames, destination frame ids (`transitionNodeID`) become membership-checkable; emit the transition fields when the destination resolves. If not harvested → keep deviation #16 wording. Low priority: 3 paths.

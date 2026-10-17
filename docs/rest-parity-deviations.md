@@ -27,7 +27,7 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 7 | `layoutVersion` never emitted | ~492 paths | The plugin API exposes no layout version counter. Purely informational in REST. |
 | 8 | Instance `overrides` arrays not emitted | ~146 | The plugin has no override table for instance children. |
 | 9 | `fillOverrideTable` not emitted | ~130 | Not exposed by the plugin API. |
-| 10 | **Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`) | ~590 | The plugin cannot see ids inside the defining library file. The `key` field (40-hex hash) in the styles metadata **does match REST exactly**, so consumers can correlate bindings ↔ styles by key. Local styles are byte-exact. |
+| 10 | **Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`) | ~590 | The plugin cannot see ids inside the defining library file. The `key` field (40-hex hash) in the styles metadata **does match REST exactly**, so consumers can correlate bindings ↔ styles by key. Local styles are byte-exact. **Round 4 machinery built** (library harvest — see *Library style ids* below); retire per harvested library. |
 | 11 | Inherited properties on instance children omitted — style bindings (plugin returns `""`) and `SCALE`/`SCALE` constraints (plugin returns the MIXED sentinel) | 3 nodes + 26 paths | Would require resolving the main component's corresponding child node (the `;`-suffix in instance child ids encodes the original node id). Future work. |
 | 12 | `scrollBehavior` always `"SCROLLS"`; `isFixed` never emitted | 3 nodes | The plugin API has no pinned-frame detection. |
 | 13 | ~~`fontPostScriptName` always `null`~~ **Retired (Round 2):** bridge-side corpus table emits the 5 (family, style) combos REST names | ~~38~~ 0 | The rule is `Family-Style` (spaces stripped), but REST only has server-side names for some combos — Inter is null except `Inter/Medium` in the corpus. Presence is tabulated in `store/font-metrics.json` (build: `tools/build-font-metrics.ts`), not derived. On `styleOverrideTable` entries REST emits it (name or null) exactly when `fontFamily` is in the delta (34/34 corpus entries). |
@@ -156,6 +156,35 @@ separate numbers; the scorecard table shows both per root cause.
   the whole golden corpus. The probe now carries `rawExportSettings`.
 - 2 instance-`overrides` id shifts (frame 237:221): remote-main drift, the
   #37 family.
+
+## Library style ids (Round 4 — machinery in place, harvest pending)
+
+Deviation #10's resolution is built and verified end-to-end on the one
+corpus-proven join, but is **not yet reflected in the scorecard** until the
+operator runs the plugin inside the defining library file.
+
+- **Join:** the 40-hex publish `key` is identical from both sides. The
+  plugin's `page-index` now carries the local styles of whatever file it
+  runs in; run inside a library, that is the key→nodeId table. The bridge
+  persists it as `store/libraries/<fileKey>.json` (snapshot per file,
+  merged into one join table at load) and rewrites consumer frames at
+  persist time (`lib/library-harvest.ts`, after the font-metrics rewriter):
+  remote `styles` map entries re-key from the consumer marker id to the
+  library node id, `node.styles` binding values follow, consumer-side
+  metadata is kept (REST reads the same cached copy).
+- **Unresolved report:** `store/<fileKey>/unresolved-library-styles.json`
+  (key, name, usedBy node ids) rebuilds on every frame save — the operator
+  to-do list of libraries still needing a harvest run.
+- **Verified live:** synthetic harvest `bccec861… → 36:572` (Icon/Icon Grid)
+  rewrote frame 147:348's binding + map key; 22 remaining remote styles
+  appeared in the report; state restored. Full scorecard impact lands
+  after the real harvest + re-pull.
+- **New open observation (staleness family):** DevBoard today has 1 local
+  style vs 19 in the Oct-15 fixtures, and that style (Purple-main) reports
+  an **empty plugin marker** (`"S:<40hex>,"` from both
+  `getLocalPaintStylesAsync` and `getStyleByIdAsync`; Oct-15 REST keyed it
+  `67:659`). Its live REST key is unknown — settle with the same re-fetch
+  that covers the `exportSettings` staleness check.
 
 ## Closed questions (experiments recorded)
 

@@ -358,6 +358,11 @@ async function loadAllPagesSafe(): Promise<void> {
 
 async function buildPageIndex() {
   await loadAllPagesSafe();
+  // Round 4 harvest: enumerate this file's local styles. Run inside a
+  // library file, this is the key→nodeId join table the bridge needs to
+  // resolve consumer-side remote style bindings (deviation #10).
+  const styles: Record<string, unknown> = {};
+  await enumerateLocalStyles(styles);
   const pages = figma.root.children.map((page) => {
     const bg = ((page as any).backgrounds ?? []).find((p: any) => p.visible !== false && p.color);
     return {
@@ -373,7 +378,7 @@ async function buildPageIndex() {
       })),
     };
   });
-  return { fileKey: await effectiveFileKey(), pages };
+  return { fileKey: await effectiveFileKey(), pages, styles };
 }
 
 // ---------------------------------------------------------------------------

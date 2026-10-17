@@ -44,6 +44,12 @@ import {
   type StoredPageIndex,
 } from "./lib/stitch.js";
 import { parseFontMetricsTable, rewriteFontMetrics } from "./lib/font-metrics.js";
+import {
+  collectUnresolvedStyles,
+  loadLibraryIndex,
+  rewriteFrameStyles,
+  writeLibraryHarvest,
+} from "./lib/library-harvest.js";
 
 const HOST = process.env.BRIDGE_HOST ?? "127.0.0.1"; // numeric literal — never '0.0.0.0'
 const PORT = Number(process.env.BRIDGE_PORT ?? 3002);
@@ -65,6 +71,15 @@ const FONT_METRICS = parseFontMetricsTable(
     }
   })(),
 );
+
+/**
+ * Round 4 (G1) — harvested library styles, keyed by 40-hex publish key.
+ * `store/libraries/*.json` is written whenever a `page-index` command runs
+ * inside a library file (the plugin enumerates that file's local styles);
+ * consumer frames are rewritten against this join table at persist time.
+ */
+const LIBRARIES_DIR = path.join(STORE_DIR, "libraries");
+let LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
 
 class BridgeError extends Error {
   constructor(public status: number, message: string) {
@@ -113,6 +128,18 @@ function savePageIndex(payload: StoredPageIndex & Record<string, unknown>): void
   const dir = storeDir(payload.fileKey);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, "pages.json"), JSON.stringify(payload, null, 2));
+  // Round 4 harvest: a page-index run inside ANY file records that file's
+  // local styles as a library join table. Inside a library file this is the
+  // key→nodeId mapping REST's consumer-side output is keyed by.
+  if (payload.styles && typeof payload.styles === "object") {
+    const harvest = writeLibraryHarvest(LIBRARIES_DIR, payload.fileKey, payload.styles as Record<string, any>);
+    if (harvest) {
+      LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+      console.log(
+        `[bridge] library harvest: ${payload.fileKey} — ${Object.keys(harvest.styles).length} styles`,
+      );
+    }
+  }
   touchMeta(payload.fileKey);
 }
 
@@ -130,14 +157,37 @@ function applyFontMetrics(f: any): void {
   if (FONT_METRICS) rewriteFontMetrics(f, FONT_METRICS);
 }
 
+/**
+ * Round 4 (G1) — resolve remote (library) style ids to the defining
+ * library file's node ids via the harvest join table. The unresolved-style
+ * report is refreshed by saveFrame after the frame hits disk (it reads the
+ * whole stored file, including the frame just saved).
+ */
+function applyLibraryStyles(f: any): void {
+  rewriteFrameStyles(f, LIB_INDEX);
+}
+
+/** Rebuild store/<fileKey>/unresolved-library-styles.json from stored frames. */
+function refreshUnresolvedReport(key: string): void {
+  const frames = listFramesForFile(key);
+  const unresolved = collectUnresolvedStyles(frames, LIB_INDEX);
+  const report = { fileKey: key, generatedAt: new Date().toISOString(), styles: unresolved };
+  fs.writeFileSync(
+    path.join(storeDir(key), "unresolved-library-styles.json"),
+    JSON.stringify(report, null, 2),
+  );
+}
+
 function saveFrame(f: any): { id: string; name: string; file: string } {
   const key = f?.fileKey ?? "default";
   const dir = framesDirFor(key);
   fs.mkdirSync(dir, { recursive: true });
   applyFontMetrics(f);
+  applyLibraryStyles(f);
   const file = path.join(dir, `${frameFileName(f.id)}.json`);
   fs.writeFileSync(file, JSON.stringify(f, null, 2));
   touchMeta(key);
+  refreshUnresolvedReport(key);
   return { id: f.id, name: f.name, file: path.basename(file) };
 }
 
