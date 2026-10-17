@@ -43,12 +43,28 @@ import {
   type StoredFrame,
   type StoredPageIndex,
 } from "./lib/stitch.js";
+import { parseFontMetricsTable, rewriteFontMetrics } from "./lib/font-metrics.js";
 
 const HOST = process.env.BRIDGE_HOST ?? "127.0.0.1"; // numeric literal — never '0.0.0.0'
 const PORT = Number(process.env.BRIDGE_PORT ?? 3002);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STORE_DIR = path.join(ROOT, "store");
+
+/**
+ * Round 2 (C1/C3/C4) — corpus-bootstrapped font metrics, built by
+ * tools/build-font-metrics.ts. Applied at persist time (lib/font-metrics.ts);
+ * null when the table is absent (rewriting simply disabled).
+ */
+const FONT_METRICS = parseFontMetricsTable(
+  (() => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(STORE_DIR, "font-metrics.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  })(),
+);
 
 class BridgeError extends Error {
   constructor(public status: number, message: string) {
@@ -100,10 +116,25 @@ function savePageIndex(payload: StoredPageIndex & Record<string, unknown>): void
   touchMeta(payload.fileKey);
 }
 
+/**
+ * Round 2 (C1/C3/C4) — rewrite text-style font metrics from the corpus table.
+ *
+ * The plugin can only estimate intrinsic line heights (height ÷ lines) and
+ * cannot see server-side font metrics at all: REST's INTRINSIC lineHeightPx,
+ * PIXELS lineHeightPercent and named fontPostScriptName values are all
+ * computed from real font data. They are pure per-family functions
+ * (corpus-validated, see tools/build-font-metrics.ts), so the bridge
+ * rewrites them at persist time — plugin output stays untouched.
+ */
+function applyFontMetrics(f: any): void {
+  if (FONT_METRICS) rewriteFontMetrics(f, FONT_METRICS);
+}
+
 function saveFrame(f: any): { id: string; name: string; file: string } {
   const key = f?.fileKey ?? "default";
   const dir = framesDirFor(key);
   fs.mkdirSync(dir, { recursive: true });
+  applyFontMetrics(f);
   const file = path.join(dir, `${frameFileName(f.id)}.json`);
   fs.writeFileSync(file, JSON.stringify(f, null, 2));
   touchMeta(key);

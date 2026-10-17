@@ -349,6 +349,43 @@ Guardrails: verify linearity with a second size before accepting; results POST t
 **Files:** `plugin/lib/rest-mapping.ts` (+ tests).
 **Acceptance:** 38 paths → 0 on corpus fonts.
 
+> **STATUS: ✅ completed 2026-10-17.** C1, C3 and C4 landed — all bridge-side,
+> via one rewriter; C2 (runtime font probing) deferred as optional
+> generalization. `npm run check` green, 69/69 tests.
+> **Scorecard: 1,774 paths / 98.246% byte parity** (from 2,335 / 97.692%;
+> G2: 573 → 12). Measured outcomes:
+> - **C1 multipliers are FAMILY-level, not family+style** (measured: 906
+>   corpus samples, 4 families, worst-case fit error ~1e-6 — Inter is
+>   1.21022725 for Regular/Semi Bold/Bold/Extra Bold alike). REST emits raw
+>   float64 doubles, not rounded values; the golden-diff normalizer rounds
+>   to 4 decimals, so a <1e-5 fit is exact after normalization.
+> - **All three fixes live in one bridge-side rewriter** (`lib/font-metrics.ts`,
+>   applied at persist time, table in gitignored `store/font-metrics.json`):
+>   INTRINSIC `lineHeightPx` rewrite (fixes the estimate *and* deviation
+>   #19's omission on fixed-height boxes), PIXELS `lineHeightPercent`
+>   (= px ÷ intrinsic × 100, validated exactly on 146 samples), and
+>   `fontPostScriptName` (corpus table of the 5 combos REST names — the
+>   rule is `Family-Style` but REST reports null for Inter except
+>   Inter/Medium, so presence is tabulated, not derived). Deviations #13,
+>   #17, #18, #19 retired.
+> - **C3/C4 went bridge-side instead of plugin-side** (the plan sketched
+>   `rest-mapping.ts` changes): the multiplier table already lives
+>   bridge-side per C1's key insight — lineHeightPx is a pure function of
+>   (font, size) — so percent and PS names reuse it without a publish cycle.
+>   The rewriter's SOT `fontPostScriptName` branch (name-or-null when
+>   `fontFamily` is in the delta, FONT_KEYS group — 34/34 corpus entries)
+>   is correct but cannot fire yet: our SOT entries omit the font group
+>   whenever the segment matches our chosen base (#20 family).
+> - **G2 residue = 12 paths, all #20/#37-family, none font metrics:**
+>   frame `180:304` (8) is the base-vs-SOT swap (REST picked the INTRINSIC
+>   segment as base, we pick `segments[0]`), frame `180:338` (4) is REST
+>   emitting a *stored* SOT entry whose values equal the base — a live
+>   diff cannot see it (same ceiling as #37). Both fold into Round 3's
+>   base-style work or the stored-record deviation.
+> - **Deferred: C2 runtime font probing** — corpus bootstrap covers all
+>   DevBoard fonts; the `probe-fonts` command is pure generalization for
+>   unseen fonts and stays unplanned until a real file needs it.
+
 ---
 
 ## Round 3 — G4: base-style text model (317 paths)

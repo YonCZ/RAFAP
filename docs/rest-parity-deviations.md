@@ -30,7 +30,7 @@ Each per-node item notes the measured impact on the DevBoard reference file
 | 10 | **Remote style ids**: for library (remote) styles, `node.styles` values and `styles` map keys use the local marker suffix (e.g. `209:80`) instead of the library file's node id (e.g. `10:875`) | ~590 | The plugin cannot see ids inside the defining library file. The `key` field (40-hex hash) in the styles metadata **does match REST exactly**, so consumers can correlate bindings ↔ styles by key. Local styles are byte-exact. |
 | 11 | Inherited properties on instance children omitted — style bindings (plugin returns `""`) and `SCALE`/`SCALE` constraints (plugin returns the MIXED sentinel) | 3 nodes + 26 paths | Would require resolving the main component's corresponding child node (the `;`-suffix in instance child ids encodes the original node id). Future work. |
 | 12 | `scrollBehavior` always `"SCROLLS"`; `isFixed` never emitted | 3 nodes | The plugin API has no pinned-frame detection. |
-| 13 | `fontPostScriptName` always `null` | ~38 | The plugin cannot produce real PostScript names (e.g. `SFProText-Semibold`). |
+| 13 | ~~`fontPostScriptName` always `null`~~ **Retired (Round 2):** bridge-side corpus table emits the 5 (family, style) combos REST names | ~~38~~ 0 | The rule is `Family-Style` (spaces stripped), but REST only has server-side names for some combos — Inter is null except `Inter/Medium` in the corpus. Presence is tabulated in `store/font-metrics.json` (build: `tools/build-font-metrics.ts`), not derived. On `styleOverrideTable` entries REST emits it (name or null) exactly when `fontFamily` is in the delta (34/34 corpus entries). |
 | 14 | `rotation` omitted when `0` — REST emits `rotation: 0` on nodes that once had rotation (history) | 4 nodes | The plugin cannot distinguish "never rotated" from "rotated back to 0". |
 | 15 | Zeroed `rectangleCornerRadii: [0,0,0,0]` + `cornerSmoothing: 0` not emitted for nodes with radius *history* but zero radius (6 VECTOR + 1 GROUP) | 7 nodes / 14 paths | History is not visible. `VectorNode` exposes **no** corner properties in the plugin API (`cornerRadius`/`cornerSmoothing` are undefined at runtime), so even the mask heuristic cannot fire for vectors; GROUP radius history is likewise invisible. |
 | 16 | Frame-level `transitionDuration`/`transitionEasing`/`transitionNodeID` not derived from `NODE` actions | 1 node | REST derives these from a remote (library) destination frame the plugin cannot read. `interactions` themselves match REST exactly. |
@@ -39,9 +39,9 @@ Each per-node item notes the measured impact on the DevBoard reference file
 
 | # | Deviation | Impact | Rationale |
 |---|---|---|---|
-| 17 | Intrinsic `lineHeightPx` is an **estimate** (`node height ÷ line count`, rounded) | ~435 | REST computes it from font metrics (e.g. `17.9004` vs our `18`). The plugin exposes neither the metrics nor the resolved value. Functionally equivalent within a fraction of a pixel. |
-| 18 | `lineHeightPercent` not emitted for `PIXELS`-unit texts | ~73 | REST emits a derived percent alongside the px value; the plugin has only the px value. |
-| 19 | Fixed-height intrinsic texts emit no `lineHeightPx` | ~20 | The height ÷ lines estimate is wrong for fixed-height boxes, so we omit rather than lie. |
+| 17 | ~~Intrinsic `lineHeightPx` is an **estimate**~~ **Retired (Round 2):** rewritten from a corpus-fitted per-family multiplier table | ~~435~~ 0 | `lineHeightPx` for AUTO heights is a pure per-family multiplier × fontSize (906 samples, 4 families, worst-case fit error ~1e-6). The bridge rewrites it at persist time (`lib/font-metrics.ts`, table in gitignored `store/font-metrics.json`). REST emits raw float64 doubles; the golden-diff normalizer rounds to 4 decimals, so a <1e-5 fit is byte-exact after normalization. |
+| 18 | ~~`lineHeightPercent` not emitted for `PIXELS`-unit texts~~ **Retired (Round 2):** computed as px ÷ intrinsic × 100 | ~~73~~ 0 | Validated exactly on 146 corpus samples using the multiplier table from #17. Emitted bridge-side at persist time. |
+| 19 | ~~Fixed-height intrinsic texts emit no `lineHeightPx`~~ **Retired (Round 2):** the multiplier table makes it derivable | ~~20~~ 0 | Line height is a property of the style, not the box; REST always emits `lineHeightPx` for INTRINSIC regardless of auto-resize, and the rewriter now does too. |
 | 20 | Default-style baseline: REST stores a node **base style** plus per-range diffs, and the base sometimes matches *no* segment. We use `segments[0]` as the default and diff everything else against it. Also manifests in `fills`: mixed-fill texts get the default segment's paint as the node-level `fills` (matches REST on 7/8 measured nodes; on the eighth, REST's base is the *other* segment, so node-level `fills` and the override-table entry swap). | ~280 paths | The plugin exposes only resolved per-segment styles. The reconstruction is information-equivalent (every segment's full style is derivable both ways), but not byte-identical. |
 | 21 | `styleOverrideTable` entries lack `inheritFillStyleId`/`inheritTextStyleId` | 2 entries | Per-range style ids are not exposed via `getStyledTextSegments`. |
 | 22 | `letterSpacing` PERCENT converted to px (`fontSize × value ÷ 100`) | — | REST exposes a plain px number; the plugin API has percent units. |
@@ -91,6 +91,38 @@ Each per-node item notes the measured impact on the DevBoard reference file
 |---|---|---|
 | 37 | INSTANCE `overrides` are emitted by **live-diffing each instance against its main component**; REST reports Figma's **stored user-edit records**. Exact where the main hasn't drifted (local mains: 96/97 arrays match, 77/77 empty arrays match), but remote (library) mains drift after insertion — renamed mains fire false `name`, edited/updated mains leave stale subtree ids that break correspondence (missing entries), and overrides absorbed by library updates disappear (REST fires, live values now match). Remote-main arrays match 1/49. | The plugin API exposes no override records; a live diff is the only derivable semantics. Suppression rules were measured and rejected: REST genuinely fires `name` (×16) and self `width`/`height` (×33) on remote-main instances, so remote-only suppression loses more true positives than it removes noise. |
 | 38 | `fillOverrideTable` is never emitted | The emission rule is underivable: all 130 corpus values are `{"1": null}` (5 vectors have 3 slots); presence is uncorrelated with `vectorNetwork` regions (53 with-table vectors report 0 regions, 21 without-table report 1), segment/vertex counts, fills, strokes, or any REST-visible feature (probed all 130 + 40 controls). Same discipline as `layoutVersion` (F1): no rule without a ≥99% corpus fit. ~130 paths of residue. |
+
+## Text metrics (Round 2)
+
+Deviations #13, #17, #18 and #19 are retired by one bridge-side rewriter
+(`lib/font-metrics.ts`, applied at persist time). REST computes these fields
+from real font metrics the plugin API does not expose; all three are pure
+per-family functions of the emitted style, corpus-fitted into
+`store/font-metrics.json` (gitignored — corpus-derived data) by
+`tools/build-font-metrics.ts`:
+
+| Field | Rule (corpus-validated) | Samples |
+|---|---|---|
+| INTRINSIC `lineHeightPx` | per-family multiplier × fontSize | 906 / 4 families, ≤1e-6 error |
+| PIXELS `lineHeightPercent` | lineHeightPx ÷ (multiplier × fontSize) × 100 | 146, exact |
+| `fontPostScriptName` | `Family-Style` (spaces stripped), but only for combos REST names — null for Inter except Inter/Medium; on `styleOverrideTable` entries present exactly when `fontFamily` is in the delta (34/34) | 1046 |
+
+Notes:
+
+- The multiplier is **family-level**, not family+style — Inter is
+  1.21022725 for Regular/Semi Bold/Bold/Extra Bold alike.
+- REST emits **raw float64 doubles** (e.g. `36.30681610107422`), not
+  rounded values; byte parity is measured after the golden-diff normalizer
+  rounds to 4 decimals, so any fit within 1e-5 is exact there.
+- The plugin output is untouched: the rewriter runs at persist time only,
+  so unknown fonts (absent from the table) keep the plugin's estimate or
+  omission — the fallback behavior of the retired deviations.
+- **G2 residue = 12 paths, none font metrics.** Frame `180:304` (8) is the
+  #20 base-vs-SOT swap (REST picked the INTRINSIC segment as the node's
+  base style; we pick `segments[0]`). Frame `180:338` (4) is REST emitting
+  a *stored* SOT entry whose values equal the base — invisible to a live
+  diff (the #37 stored-record ceiling, SOT variant). Both belong to
+  Round 3's base-style model, not to font metrics.
 
 ## Closed questions (experiments recorded)
 
