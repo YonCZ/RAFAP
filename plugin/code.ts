@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.5.1";
+const PLUGIN_VERSION = "3.7.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
@@ -62,6 +62,126 @@ function sanitize(value: unknown): unknown {
 
 function postToUI(msg: unknown) {
   figma.ui.postMessage(sanitize(msg));
+}
+
+// ---------------------------------------------------------------------------
+// Round 7 (C2) — runtime font-metrics probing for unseen families
+// ---------------------------------------------------------------------------
+
+/**
+ * Discover the largest font size Figma accepts on a scratch text node —
+ * huge values may clamp or throw; the read-back is the truth.
+ */
+function discoverMaxFontSize(t: TextNode): number {
+  for (const candidate of [100000, 50000, 20000, 10000, 5000, 2000]) {
+    try {
+      t.fontSize = candidate;
+      const rb = t.fontSize;
+      if (typeof rb === "number" && rb >= 1000) return Math.min(rb, candidate);
+    } catch {
+      /* try the next smaller candidate */
+    }
+  }
+  return 1000;
+}
+
+/**
+ * Measure per-family intrinsic line-height multipliers the bridge cannot
+ * know for files outside the corpus. A scratch TEXT node is created, its
+ * AUTO line height sampled across two bands of large font sizes, and the
+ * node removed — all inside this one command, so it lands as a single undo
+ * step in the document. Layout rounds line heights to integer px per line;
+ * the many per-size samples let the bridge intersect the rounding windows
+ * and recover the exact multiplier. Human-triggered only (undo stack +
+ * dirty flag); never during pulls. With no `requested` list, every unique
+ * font in the current document is probed.
+ */
+async function probeFonts(requested?: { family: string; style?: string }[]): Promise<unknown> {
+  const wanted: FontName[] = [];
+  if (Array.isArray(requested) && requested.length) {
+    for (const f of requested) {
+      if (typeof f?.family === "string" && f.family) {
+        wanted.push({ family: f.family, style: typeof f.style === "string" ? f.style : "Regular" });
+      }
+    }
+  } else {
+    // dynamic page loading: pages must be loaded before their children are
+    // readable (same rule as buildPageIndex)
+    await figma.loadAllPagesAsync();
+    const seen = new Set<string>();
+    const visit = (node: BaseNode): void => {
+      if (node.type === "TEXT") {
+        const t = node as TextNode;
+        const fn = (t as unknown as { fontName: FontName | typeof figma.mixed }).fontName;
+        if (fn && fn !== figma.mixed) {
+          seen.add(`${fn.family}\u0000${fn.style}`);
+        } else {
+          for (let i = 0; i < t.characters.length; i++) {
+            const r = t.getRangeFontName(i, i + 1) as FontName;
+            if (r) seen.add(`${r.family}\u0000${r.style}`);
+          }
+        }
+      }
+      for (const c of (node as ChildrenMixin).children ?? []) visit(c);
+    };
+    for (const page of figma.root.children) visit(page);
+    for (const key of seen) {
+      const [family, style] = key.split("\u0000");
+      wanted.push({ family, style });
+    }
+  }
+
+  const fonts: Record<string, unknown>[] = [];
+  // figma.createText() starts with the default font (Inter Regular); it must
+  // be loaded before any write to the scratch node.
+  await figma.loadFontAsync({ family: "Inter", style: "Regular" });
+  for (const font of wanted) {
+    const entry: Record<string, unknown> = { family: font.family, style: font.style };
+    try {
+      await figma.loadFontAsync(font);
+      const t = figma.createText();
+      try {
+        t.textAutoResize = "HEIGHT";
+        t.fontName = font;
+        t.lineHeight = { unit: "AUTO" };
+        t.characters = "Ag\nAg\nAg\nAg\nAg"; // ascenders + descenders, 5 lines
+        // Sample several large sizes: line-height layout rounds to integer
+        // px per line, so a single size only bounds the multiplier to
+        // ±0.5/size. The bridge intersects the per-size windows (each
+        // sample: m ∈ [(L−0.5)/S, (L+0.5)/S]) to recover the underlying
+        // multiplier to well past the normalizer's 4 decimals.
+        const samples: { size: number; linePx: number }[] = [];
+        {
+          const cap = discoverMaxFontSize(t);
+          // Width covers "Ag" at the largest sampled size (wrapping would
+          // double the line count and empty the bridge-side intersection).
+          t.resize(cap * 3, t.height);
+          // Two bands of descending sizes. Each sample bounds the multiplier
+          // to ±0.5/size; ~4e7 total (count × size) recovers it to ~5e-8 —
+          // far past the normalizer's 4 decimals. The second band at half
+          // the size doubles as the linearity guard.
+          const nHi = Math.min(3000, Math.max(200, Math.ceil(4e7 / cap)), cap - 200);
+          const half = Math.floor(cap / 2);
+          const nLo = Math.max(50, Math.min(1500, Math.ceil(nHi / 2), half - 100));
+          for (let i = 0; i < nHi; i++) {
+            t.fontSize = cap - i;
+            samples.push({ size: t.fontSize, linePx: t.height / 5 });
+          }
+          for (let i = 0; i < nLo; i++) {
+            t.fontSize = half - i;
+            samples.push({ size: t.fontSize, linePx: t.height / 5 });
+          }
+        }
+        entry.samples = samples;
+      } finally {
+        t.remove(); // create + measure + remove = one undo step
+      }
+    } catch (e) {
+      entry.error = (e as Error).message ?? String(e);
+    }
+    fonts.push(entry);
+  }
+  return { fonts, probedAt: new Date().toISOString() };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +228,9 @@ figma.ui.onmessage = async (msg: any) => {
         for (const node of sel) payload.push(await extractFramePayload(node));
       } else if (commandType === "export") {
         payload = await exportNodes(params.ids, params.format, params.scale);
+      } else if (commandType === "probe-fonts") {
+        // Round 7 (C2) — runtime font-metrics probing for unseen families.
+        payload = await probeFonts(params?.fonts);
       } else if (commandType === "probe") {
         // Round 1 dev tool — raw node facts for corpus-rule fitting
         // (vectorNetwork regions, constraints, style ids, dimensions), or a

@@ -261,9 +261,13 @@ export function diffTrees(rest: unknown, ours: unknown, path = "$", out: TreeDif
     for (const k of keys) {
       const r = (rest as Record<string, unknown>)[k];
       const o = (ours as Record<string, unknown>)[k];
-      if (r === undefined) out.push({ path: `${path}.${k}`, kind: "missing-in-rest", ours: o });
-      else if (o === undefined) out.push({ path: `${path}.${k}`, kind: "missing-in-ours", rest: r });
-      else diffTrees(r, o, `${path}.${k}`, out);
+      // normalize() maps empty objects to undefined ("{} ≡ absent"), so a
+      // key can be undefined on BOTH sides (an empty object in both trees).
+      // That is equality, not a difference — only report a side as missing
+      // when the other side actually has a value.
+      if (r === undefined && o !== undefined) out.push({ path: `${path}.${k}`, kind: "missing-in-rest", ours: o });
+      else if (o === undefined && r !== undefined) out.push({ path: `${path}.${k}`, kind: "missing-in-ours", rest: r });
+      else if (r !== undefined && o !== undefined) diffTrees(r, o, `${path}.${k}`, out);
     }
     return out;
   }

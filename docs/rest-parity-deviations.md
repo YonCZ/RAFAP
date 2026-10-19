@@ -121,9 +121,30 @@ Notes:
 - REST emits **raw float64 doubles** (e.g. `36.30681610107422`), not
   rounded values; byte parity is measured after the golden-diff normalizer
   rounds to 4 decimals, so any fit within 1e-5 is exact there.
+- **R7.1 — the exact emission model, verified 16/16 on golden:** REST
+  computes `lineHeightPx = float32(fontSize × float32(m_true))` where
+  `m_true = (ascender + descender + lineGap) / unitsPerEm` is a rational
+  with denominator ≤ 16384 (Inter = 3408/2816 → 213/176, SF Pro Text =
+  2444/2048). Corpus "fit" multipliers are double-precision
+  approximations of `float32(m_true)` — at most 1 ulp off.
+- **R7.1 — `probe-fonts` (human-triggered) closes unseen families:** the
+  plugin samples AUTO line heights at large font sizes (cap discovery up
+  to 100000, two bands, ~600 samples/style) and the bridge snaps the
+  multiplier window to the smallest-denominator rational that validates
+  every sample one-sidedly (`e = linePx − m·size ∈ [−0.5, +1.5]` — Figma's
+  layout box picks up strictly-upward +1 px anomalies at large sizes).
+  When the window is narrower than `1/d̂²`, the snap is provably the true
+  rational and the family is listed in `exactRationalFamilies`; the
+  rewriter then emits `Math.fround(size × Math.fround(m))` —
+  **bit-identical to REST** (acceptance: Inter probe → exactly 213/176,
+  10/10 golden REST values reproduced bit-exactly; Space Grotesk probe →
+  exactly 1276/1000, a never-seen family, 150/150 text nodes in the
+  second-file pull bit-exact). Corpus (fit) entries keep the plain double
+  product — fround-ing them could break existing 1e-6-parity.
 - The plugin output is untouched: the rewriter runs at persist time only,
   so unknown fonts (absent from the table) keep the plugin's estimate or
-  omission — the fallback behavior of the retired deviations.
+  omission — the fallback behavior of the retired deviations (now the
+  documented degradation mode, see "Degradation modes" below).
 - **G2 residue = 12 paths, none font metrics.** Frame `180:304` (8) is the
   #20 base-vs-SOT swap (REST picked the INTRINSIC segment as the node's
   base style; we pick `segments[0]`). Frame `180:338` (4) is REST emitting
@@ -199,6 +220,116 @@ byte-identical to REST (42/42 entries).
   `action.transition` all null) injected by the bridge from the
   rest-bootstrap **transition table** (`bootstrapTransitionsFromDocument`,
   per-file — node ids are file-scoped, never merged globally).
+
+## Degradation modes (Round 7)
+
+RAFAP is honest about what it cannot see; every capability that depends on
+data the plugin API does not expose degrades along an explicit ladder.
+These are **contracts, pinned by tests** (`tests/font-metrics.test.ts`,
+"degradation ladder"; `tests/library-harvest.test.ts`, unresolved markers).
+
+**INTRINSIC `lineHeightPx`** (per family):
+
+1. **Probe-snapped (exact rational)** — `exactRationalFamilies` entry:
+   bit-exact float32 emulation of REST (`fround(size × fround(m))`).
+2. **Corpus (fit) multiplier** — plain double product, ≤1 ulp of REST's
+   float32 result (byte parity at the normalizer's 4-decimal rounding).
+3. **Unseen, unprobed family** — the plugin's best-effort estimate passes
+   through: `rendered height ÷ line count` for auto-height texts (exact for
+   single-line texts — Figma's own layout produced it — wrong for wrapped
+   multi-line texts, where the plugin can only count explicit newlines),
+   and **omitted** for fixed-height texts (deviation #19's residual).
+
+Run `probe-fonts` (see README) to move a family from tier 3 to tier 1.
+
+**`fontPostScriptName`** (per family × style): the plugin API exposes no
+PostScript names, so the corpus table is the only source. Probed families
+(R7.4 measurement: Space Grotesk) get exact `lineHeightPx` but REST's PS
+names (`SpaceGrotesk-Medium`, …) stay `null` — REST's own naming is not
+derivable (the corpus has Inter emitting `null` for Inter/Regular but a
+name for Inter/Medium), so guessing would be a coin flip.
+
+**Remote (library) style ids** (per file):
+
+1. **Rest-bootstrapped** (token + alias, one cached 429-safe REST call):
+   byte-identical library node ids.
+2. **Token-free / no alias:** ids stay local markers — the 40-hex publish
+   `key` still matches REST exactly, so bindings ↔ styles remain
+   correlatable, just not byte-identical. The unresolved report
+   (`store/<fileKey>/unresolved-library-styles.json`) lists what is
+   missing.
+
+The token-free "open the library file and harvest" alternative is **not an
+open option** — Round 4 probe-verified current Figma reports local styles
+with empty-id markers in every file, via every accessor.
+
+**No font-metrics store at all:** rewriting is disabled; everything is
+tier 3. A malformed store parses to null (never garbage) and is ignored.
+
+## Token stance (Round 7 — decision record)
+
+RAFAP is **token-free by default**: pull, all parity work, and every tool
+except the style-id bootstrap work with zero credentials. An optional
+`FIGMA_TOKEN` (or `~/.figma-token`) upgrades remote style ids to
+byte-exact library node ids via one cached, 429-safe REST call per file
+(never retried on 429 — §9.2 discipline). This is a **decision, not a
+TODO**: the token-free alternative was probe-verified impossible (empty
+id markers, above), so the trade-off is final unless Figma changes the
+plugin API.
+
+## Second-file acceptance (Round 7 — R7.4)
+
+The round's gate: a never-seen file (the Positivus community template,
+3,593 nodes / 35 frames / 3 pages, Space Grotesk + remote styles) pulled
+and diffed against one full-file REST snapshot. Result: **every residue
+path maps to a known class** — no new systemic class. Per-file parity:
+95.4% byte / 96.5% semantic at the normalizer's rounding (lower than the
+corpus's 98.901/99.234 because the file is far heavier in instances, the
+G5 stored-record class). Findings, in the order they surfaced:
+
+- **Stale library index (fixed):** a rest-bootstrap written after bridge
+  startup (hand-seeded, or by an earlier run) was invisible to the
+  in-memory join index — remote style ids stayed `S:` markers.
+  `refreshLibraryIndexIfStale()` now reloads the index (and clears the
+  per-file transition tables) whenever a harvest/bootstrap file newer
+  than the index appears. After the fix: 0 unresolved markers, G1
+  dropped 375 → 13 paths.
+- **Harness phantom diffs (fixed):** `normalize()` maps empty objects to
+  undefined (`{} ≡ absent`), so a key like `styleOverrideTable` present
+  as `{}` on BOTH sides compared as missing-in-rest. `diffTrees` now
+  reports a side as missing only when the other side has a value.
+  (Corpus scorecard unchanged — the corpus had no both-empty cases;
+  the second file lost 233 phantom paths.)
+- **Zero-valued image filter keys (fixed, plugin 3.7.0):** REST omits
+  zero-valued keys inside `fills[].filters` (measured 6/6 on adjusted
+  image fills: `{saturation: -1}` alone, never `{saturation: -1,
+  contrast: 0, …}`). The plugin had the keep-if-any-nonzero rule but
+  emitted all seven keys; it now drops zero-valued entries.
+- **Inherited lineHeight on mixed-size ranges (fixed):** REST
+  `styleOverrideTable` entries that inherit the base's INTRINSIC line
+  height but carry their own fontSize materialize the full group
+  (unit + percent + px = range size × multiplier) — measured on the
+  team-card texts (base 18px "p", name range 20px "h4"). The plugin
+  cannot see server-side font metrics, so the bridge's rewriter adds
+  the group at persist time. Corpus shape (same-size ranges) confirmed
+  the negative case: no lineHeight keys when px is equal.
+- **Base-style choice is stored edit history (documented):** REST's
+  node-level `style` on mixed-style texts picks a base range that
+  follows the document's edit history, not a live-derivable rule —
+  measured across both files: REST base == LAST segment's identity in
+  8/9 identity-mixed nodes, == FIRST in others (the corpus's
+  "Didn't get your code? Send a new Code" is first-based; "Didn't
+  receive any code? Send again" and Positivus's team cards are
+  last-based). 89% < the 99% rule bar → unfixable from live data; the
+  semantic layer's per-character canonicalization (re-basing on
+  char 0) already absorbs it for everything except the lineHeight
+  group above, which is now emitted exactly.
+- **New known omissions (documented):** `strokeMiterAngle` (REST-only,
+  15 paths — server-derived miter geometry, absent from the plugin
+  API; not present in the corpus) and `inheritFillStyleId`/
+  `inheritTextStyleId` gaps on style-bound SOT entries (26 paths —
+  partially covered since Round 6; the second file's style-bound
+  ranges expose the uncovered shapes).
 
 ## Closed questions (experiments recorded)
 

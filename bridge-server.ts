@@ -44,7 +44,7 @@ import {
   type StoredFrame,
   type StoredPageIndex,
 } from "./lib/stitch.js";
-import { parseFontMetricsTable, rewriteFontMetrics } from "./lib/font-metrics.js";
+import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
   collectUnresolvedStyles,
@@ -65,9 +65,11 @@ const STORE_DIR = path.join(ROOT, "store");
 /**
  * Round 2 (C1/C3/C4) — corpus-bootstrapped font metrics, built by
  * tools/build-font-metrics.ts. Applied at persist time (lib/font-metrics.ts);
- * null when the table is absent (rewriting simply disabled).
+ * null when the table is absent (rewriting simply disabled). Round 7 (C2)
+ * `probe-fonts` results merge into it at runtime (`let` — a first successful
+ * probe on a table-less install creates the table).
  */
-const FONT_METRICS = parseFontMetricsTable(
+let FONT_METRICS = parseFontMetricsTable(
   (() => {
     try {
       return JSON.parse(fs.readFileSync(path.join(STORE_DIR, "font-metrics.json"), "utf8"));
@@ -85,6 +87,29 @@ const FONT_METRICS = parseFontMetricsTable(
  */
 const LIBRARIES_DIR = path.join(STORE_DIR, "libraries");
 let LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+let LIB_INDEX_LOADED_AT = Date.now();
+/**
+ * Reload the library join index when a harvest/bootstrap file newer than
+ * the in-memory index appears on disk (seeded by hand, written by another
+ * bridge run, or by the plugin harvest path of this one after the index
+ * was built). The per-file transition tables go with it — they cache
+ * per store key and would otherwise serve the pre-bootstrap (empty) state.
+ */
+function refreshLibraryIndexIfStale(): void {
+  try {
+    const stale = fs
+      .readdirSync(LIBRARIES_DIR)
+      .some((f) => f.endsWith(".json") && fs.statSync(path.join(LIBRARIES_DIR, f)).mtimeMs > LIB_INDEX_LOADED_AT);
+    if (stale) {
+      LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
+      TRANSITION_TABLES.clear();
+      LIB_INDEX_LOADED_AT = Date.now();
+      console.log("[bridge] library index reloaded (harvest/bootstrap newer than the in-memory index)");
+    }
+  } catch {
+    /* no store/libraries yet */
+  }
+}
 /**
  * Round 5 (D4) — per-file prototype-transition tables (rest-bootstrap).
  * Keyed by store file key; node ids are file-scoped, so a table never
@@ -292,7 +317,7 @@ function latestPageIndex(): StoredPageIndex | null {
 // Command queue — agent asks, the open plugin executes (long-polled).
 // ---------------------------------------------------------------------------
 
-type CommandType = "page-index" | "frame" | "selection" | "export" | "probe";
+type CommandType = "page-index" | "frame" | "selection" | "export" | "probe" | "probe-fonts";
 
 interface AgentCommand {
   id: string;
@@ -325,7 +350,7 @@ function sweepStale(): void {
 }
 
 function createCommand(type: string, params: any): AgentCommand | null {
-  const valid: CommandType[] = ["page-index", "frame", "selection", "export", "probe"];
+  const valid: CommandType[] = ["page-index", "frame", "selection", "export", "probe", "probe-fonts"];
   if (!valid.includes(type as CommandType)) return null;
   if (type === "frame" && !params?.id) return null;
   if (type === "export" && !Array.isArray(params?.ids)) return null;
@@ -346,6 +371,26 @@ function createCommand(type: string, params: any): AgentCommand | null {
 function persistResult(cmd: AgentCommand, payload: any): void {
   if (cmd.type === "page-index") {
     if (payload?.fileKey) savePageIndex(payload);
+    return;
+  }
+  if (cmd.type === "probe-fonts") {
+    // Round 7 (C2) — merge runtime measurements into the font-metrics
+    // store (corpus entries never overwritten; only linear probes accepted).
+    if (!payload || !Array.isArray(payload.fonts)) return;
+    if (!FONT_METRICS) FONT_METRICS = { lineHeightMultipliers: {}, postScriptNames: {} };
+    const report = mergeFontProbeResult(FONT_METRICS as FontMetricsTable, payload);
+    fs.writeFileSync(
+      path.join(STORE_DIR, "font-metrics.json"),
+      JSON.stringify(FONT_METRICS, null, 2) + "\n",
+    );
+    console.log(
+      `[fonts] probe merged: added [${report.added
+        .map((a) => `${a.family}=${a.multiplier.toPrecision(10)}${a.exact ? " (exact)" : ` ±${a.precision.toExponential(1)}`}`)
+        .join(", ") || "-"}]` +
+        (report.rejected.length
+          ? ` rejected [${report.rejected.map((r) => `${r.family}: ${r.reason}`).join("; ")}]`
+          : ""),
+    );
     return;
   }
   if (cmd.type === "export") return; // assets handled by the /v1/images caller
@@ -410,7 +455,13 @@ function realFileKey(localKey: string): string | null {
 async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
   const realKey = realFileKey(localKey);
   if (!realKey) return;
-  if (hasRestBootstrap(LIBRARIES_DIR, realKey)) return;
+  if (hasRestBootstrap(LIBRARIES_DIR, realKey)) {
+    // Cached earlier — but possibly after this bridge built its in-memory
+    // index (hand-seeded from a saved envelope, or written by a previous
+    // run): pick it up before serving.
+    refreshLibraryIndexIfStale();
+    return;
+  }
   let token = process.env.FIGMA_TOKEN;
   if (!token) {
     try {
@@ -849,6 +900,27 @@ app.get("/api/dev/probe", async (req, res) => {
       return;
     }
     const result = await runCommand("probe", { ids });
+    res.json(result);
+  } catch (e) {
+    if (e instanceof BridgeError) {
+      restError(res, e.status, e.message);
+      return;
+    }
+    restError(res, 500, (e as Error).message);
+  }
+});
+
+/**
+ * Round 7 (C2) — human-triggered runtime font probing. Probes every unique
+ * font in the currently-open file (or an explicit list), merges linear
+ * measurements into store/font-metrics.json (corpus entries kept), and
+ * returns the raw report. The document is touched (one undo step per
+ * probe batch) — this is why it is never run automatically during pulls.
+ */
+app.post("/api/dev/probe-fonts", async (req, res) => {
+  try {
+    const fonts = Array.isArray(req.body?.fonts) ? req.body.fonts : undefined;
+    const result = await runCommand("probe-fonts", fonts ? { fonts } : {}, 120_000);
     res.json(result);
   } catch (e) {
     if (e instanceof BridgeError) {

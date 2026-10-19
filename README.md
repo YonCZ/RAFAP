@@ -57,12 +57,52 @@ Find your file's local key via `curl http://127.0.0.1:3001/api/page-index`.
 Also: `?fresh=1` to force re-extraction (extension), and `_figmaAgent.svgBase64`
 on shape nodes — inline SVG exports, which the real REST API cannot do at all.
 
+## Font metrics (line heights)
+
+REST computes intrinsic `lineHeightPx` from real font metrics server-side —
+data the plugin API cannot see. RAFAP reconstructs it: a per-family
+multiplier table (fitted on a corpus, verified ≤1 ulp of REST's float32
+pipeline) is applied at persist time, and unknown families are solved
+exactly by a runtime probe. Acceptance on never-seen fonts: **bit-exact
+float32 parity** with REST's `lineHeightPx` (e.g. Space Grotesk —
+150/150 text nodes identical, bit for bit).
+
+To close a family the table doesn't know (any font used in the open file):
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/dev/probe-fonts
+```
+
+This asks the open plugin to measure the file's fonts with a scratch text
+node (one undo step, document stays clean; keep the Figma window visible —
+a backgrounded window throttles the plugin). The bridge snaps the
+measurements to the family's exact rational multiplier — when provable, the
+rewriter then emits REST's `float32(size × float32(m))` bit-for-bit. Runs
+are human-triggered, never automatic.
+
+Unprobed families degrade to the plugin's best-effort estimate — see
+"Degradation modes" in `docs/rest-parity-deviations.md`.
+
+## Tokens
+
+RAFAP is **token-free by default**: pulling, parity, and every endpoint
+work with zero credentials. An optional token (`FIGMA_TOKEN` or
+`~/.figma-token`) exists for one thing only: upgrading remote library style
+ids to byte-exact library node ids (one cached, 429-safe REST call per
+file). The token-free alternative was probed and is impossible — current
+Figma reports local styles with empty id markers — so this trade-off is a
+final decision, not a TODO (details in `docs/rest-parity-deviations.md`,
+"Token stance").
+
 ## Fidelity
 
 Verified against a real 2,361-node / 32-frame file via a golden-diff harness
-(`tools/golden-diff.ts`): document tree structure matches **exactly** (same
-ids, same order, same shapes). Remaining differences are documented plugin-API
-limits — see `report.md` and `docs/rest-parity-deviations.md`.
+(`tools/golden-diff.ts`): **98.9% byte / 99.2% semantic parity** at the
+normalizer's 4-decimal rounding; document tree structure matches exactly
+(same ids, same order, same shapes). Re-verified on a **never-seen community
+file** (3,593 nodes, different fonts, remote styles): 95.4% byte / 96.5%
+semantic with **no new deviation classes** — the residue is the same known
+plugin-API limits. See `report.md` and `docs/rest-parity-deviations.md`.
 
 ## Security
 

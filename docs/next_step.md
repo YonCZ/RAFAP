@@ -683,6 +683,124 @@ Spec 0.44.0 surfaces RAFAP doesn't map yet. **Rule: mine `golden/file-<KEY>.rest
 
 ---
 
+## Round 7 — Generalization (the prerequisite for the tool)
+
+Parity on the reference file is proven (98.901% byte / 99.234% semantic,
+all residue classified fundamental or re-encoding-only). The gap between
+"parity artifact" and "a tool people use" is that the font-metrics
+multiplier table and the library style-join are per-corpus: on a file we
+have never seen, intrinsic line heights fall back to the estimate and
+remote style ids to local markers. This round makes the system honest on
+unseen files and records the token stance as a decision. Plugin shifts to
+maintenance mode for parity; from here plugin changes serve the tool, not
+the scorecard.
+
+### R7.1. C2: `probe-fonts` command (runtime metrics for unseen families)
+
+The Round 2 sketch, implemented: a `probe-fonts` pull command using a
+scratch TEXT node (create + remove in one undo step), results POSTed to
+the bridge and merged into the font-metrics store. **Human-triggered
+only** — it mutates the document (undo stack, dirty flag); never run
+automatically during pulls.
+
+**Acceptance (met, stronger than the bar):** the probe recovers the
+family's *exact rational* multiplier (smallest-denominator snap over a
+~600-sample window at font sizes up to 100000, one-sided against Figma's
+large-size layout anomalies; certified when the window is narrower than
+`1/d̂²`) and the rewriter emits `fround(size × fround(m))` — **bit-exact
+REST parity, not 4 decimals**: Inter probed with its entry hidden snapped
+to exactly 213/176 and reproduced all golden REST px values bit-for-bit;
+Space Grotesk (never seen, community file) snapped to exactly 1276/1000
+and the full second-file pull came out 150/150 text nodes bit-identical.
+
+**Files:** `plugin/code.ts`, `bridge-server.ts`, `lib/font-metrics.ts`.
+
+### R7.2. Degradation semantics (documented + tested) — DONE
+
+- **No token / no file alias:** no bootstrap fetch; remote style ids stay
+  local markers (the 40-hex `key` still matches REST exactly — bindings ↔
+  styles remain correlatable, ids not byte-identical). This is already the
+  behavior; pinned by `tests/library-harvest.test.ts` (unresolved markers)
+  and `tests/font-metrics.test.ts` ("degradation ladder": exact-rational
+  fround / corpus double product / unseen family passes the plugin's
+  estimate through, fixed-height omission, null-table guard).
+- **Unseen font, unprobed:** intrinsic `lineHeightPx` falls back to the
+  height÷lines estimate (the pre-Round-2 behavior, now the documented
+  degradation mode rather than a bug).
+- **Entry:** `docs/rest-parity-deviations.md` "Degradation modes" section
+  added (behavior contract, per-capability ladders).
+
+### R7.3. Token stance (decision record) — DONE
+
+Recorded in README ("Tokens") and `docs/rest-parity-deviations.md`
+("Token stance (Round 7 — decision record)"): RAFAP is **token-free by
+default**; the optional auto-bootstrap (one cached, 429-safe REST call per
+file when token + alias exist) upgrades remote style ids to byte-exact
+library node ids. The token-free harvest alternative (open the library
+file in the plugin) is **not an open option** — Round 4 probe-verified
+current Figma reports local styles with empty-id markers, in every file,
+via every accessor. Decision, not a TODO.
+
+### R7.4. Second-file acceptance test (the round's gate) — PASSED
+
+A never-seen file (a community file works: different fonts, unknown
+styles, ideally library components; published files are token-readable
+for the diff side). Procedure: open in Figma → fresh pull → **one**
+full-file REST call for its corpus (per-node fixtures sliced locally, as
+in the Round 6 refresh) → golden diff → triage. Expected: the known
+deviation classes reproduce (G3/G5 fundamental, G4/G2 re-encoding) and
+**no new systemic class appears**. Any new class gets fixed or documented
+before Round 8 starts. This round's REST budget: one call (§9.2 rules
+unchanged — stop on 429).
+
+**Run (Positivus community template, 3,593 nodes / 35 frames, Space
+Grotesk + remote styles; one REST call, key redacted — see
+`store/file-key-aliases.json`):**
+every residue path maps to a known class — the gate holds. Per-file
+parity 95.4% byte / 96.5% semantic (instance-heavy file, so the G5
+stored-record class dominates). Three real defects found and fixed on
+the way (stale library index after a mid-run bootstrap; harness phantom
+diffs from `{} ≡ absent` on both sides; zero-valued image-filter keys,
+plugin 3.7.0), one emission gap closed (inherited lineHeight group on
+mixed-size SOT ranges, bridge rewriter), and two new known omissions
+documented (`strokeMiterAngle`, style-bound SOT entry completeness —
+both under the stored-record ceiling, see
+`docs/rest-parity-deviations.md` "Second-file acceptance"). The
+base-style choice on mixed texts was measured to be stored edit
+history (8/9 last-segment, rest first-segment — below the 99% bar,
+unfixable from live data). Corpus scorecard re-verified unchanged at
+98.901% byte / 99.234% semantic after the harness fix.
+
+## Round 8 — MCP surface (parity-grade tools)
+
+Upgrade the existing stdio MCP server (`bridge-server.ts`, currently the
+v2 agent-shaped tools) to the parity-grade set, keeping REST-shaped
+returns so existing prompts/SDKs work unchanged:
+
+| Tool | Maps to | Note |
+|---|---|---|
+| `get_file` | `GET /v1/files/:key` | whole doc tree; cached = instant |
+| `get_nodes` | `GET /v1/files/:key/nodes?ids=` | by id |
+| `get_images` | export command | PNG/JPG/SVG/PDF; SVG supersedes REST here |
+| `get_metadata` | styles/components/componentSets maps | design tokens |
+| `get_selection` | selection command | differentiator — "grab what I selected" |
+| `search_nodes` | bridge-side index over stored frames | by name/text/type — REST has no equivalent |
+| `request_from_figma` | command queue | unchanged (page-index/frame/selection/export) |
+
+Old tools (`list_figma_frames`, `get_figma_frame`, `get_latest_figma_frame`)
+stay for compatibility. `search_nodes` is a new bridge-side index (name,
+text content, node type over all stored frames).
+
+## Round 9 — DX & open-source hardening
+
+One-command setup, the `restart-plugin.sh` flow documented, README refresh
+(including the token stance from R7.3), golden-diff as the CI regression
+gate (fixtures cached — it's free), Community listing. H1–H10 stay
+mine-first: implement only when a real file actually uses a surface.
+
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.
@@ -690,7 +808,7 @@ Spec 0.44.0 surfaces RAFAP doesn't map yet. **Rule: mine `golden/file-<KEY>.rest
 3. `npm run check` green after every change (both tsconfigs).
 4. Every new mapping rule gets a vitest case in `tests/rest-mapping.test.ts`.
 5. Every intentional difference gets a `docs/rest-parity-deviations.md` entry; anything in a golden diff that is **not** in that doc is a bug.
-6. REST calls: never more than one per run; the corpus is cached — Rounds 0–6 above require **zero** new `api.figma.com` calls.
+6. REST calls: never more than one per run; the corpus is cached — Rounds 0–6 required **zero** new `api.figma.com` calls; Round 7 budgets exactly one (R7.4's second-file corpus).
 7. Rounds are ordered; don't start a round before the previous one's acceptance criteria are met and recorded in the scorecard (I2).
 
 ## Definition of done (project-level)
@@ -702,3 +820,5 @@ Spec 0.44.0 surfaces RAFAP doesn't map yet. **Rule: mine `golden/file-<KEY>.rest
 - [ ] Font-metrics table covers every font in the corpus; probe command covers the rest
 - [ ] Library harvest closes remote style ids for all referenced libraries
 - [ ] Deviations doc: every entry either retired or marked fundamental with the experiment that proved it
+- [ ] Second-file transfer test passed (R7.4): known deviation classes reproduce, no new systemic class
+- [ ] MCP tool surface serves `get_file`/`get_nodes`/`get_images`/`get_metadata`/`get_selection`/`search_nodes`/`request_from_figma` in REST shapes

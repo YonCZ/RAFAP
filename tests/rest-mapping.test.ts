@@ -72,6 +72,40 @@ describe("mapPaint", () => {
     });
   });
 
+  it("image filters: all-default filters are omitted entirely", () => {
+    const p = mapPaint({
+      type: "IMAGE",
+      scaleMode: "FILL",
+      imageHash: "abc",
+      filters: { contrast: 0, exposure: 0, saturation: 0, temperature: 0, tint: 0, highlights: 0, shadows: 0 },
+    } as any);
+    expect(p.filters).toBeUndefined();
+  });
+
+  it("image filters: zero-valued keys are dropped, adjusted keys kept (R7.4)", () => {
+    const p = mapPaint({
+      type: "IMAGE",
+      scaleMode: "FILL",
+      imageHash: "abc",
+      filters: {
+        contrast: 0,
+        exposure: 0.2118644118309021,
+        saturation: -1,
+        temperature: 0,
+        tint: 0,
+        highlights: 0.26271185278892517,
+        shadows: 0.19491524994373322,
+      },
+    } as any);
+    // exactly REST's emission for the measured Positivus fills
+    expect(p.filters).toEqual({
+      exposure: 0.2118644118309021,
+      saturation: -1,
+      highlights: 0.26271185278892517,
+      shadows: 0.19491524994373322,
+    });
+  });
+
   it("unknown paint types pass through (Rule B4)", () => {
     expect(mapPaint({ type: "VIDEO" } as any)).toMatchObject({ type: "VIDEO" });
   });

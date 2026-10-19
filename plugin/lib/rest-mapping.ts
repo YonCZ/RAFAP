@@ -135,11 +135,15 @@ export function mapPaint(paint: Paint): Record<string, unknown> {
       // Plugin "CROP" is REST "STRETCH" (same UI mode, different names).
       const scaleMode = img.scaleMode === "CROP" ? "STRETCH" : img.scaleMode;
       // REST omits filters when they are all defaults and rotation when 0.
+      // R7.4 (second-file acceptance): REST also omits zero-valued keys
+      // INSIDE filters — only adjusted entries appear (measured 6/6 on
+      // adjusted image fills: {saturation: -1} alone, never
+      // {saturation: -1, contrast: 0, …}).
       // The plugin renamed imageRef → imageHash (same 40-hex value).
-      const filters =
-        img.filters && Object.values(img.filters).some((v) => v !== 0 && v !== undefined)
-          ? img.filters
-          : undefined;
+      const adjusted = img.filters
+        ? Object.entries(img.filters).filter(([, v]) => typeof v === "number" && v !== 0)
+        : [];
+      const filters = adjusted.length ? (Object.fromEntries(adjusted) as Record<string, number>) : undefined;
       return omitEmpty({
         ...base,
         type: "IMAGE",
