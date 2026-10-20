@@ -771,9 +771,9 @@ history (8/9 last-segment, rest first-segment — below the 99% bar,
 unfixable from live data). Corpus scorecard re-verified unchanged at
 98.901% byte / 99.234% semantic after the harness fix.
 
-## Round 8 — MCP surface (parity-grade tools)
+## Round 8 — MCP surface (parity-grade tools) — DONE
 
-Upgrade the existing stdio MCP server (`bridge-server.ts`, currently the
+Upgrade the existing stdio MCP server (`bridge-server.ts`, previously the
 v2 agent-shaped tools) to the parity-grade set, keeping REST-shaped
 returns so existing prompts/SDKs work unchanged:
 
@@ -790,6 +790,20 @@ returns so existing prompts/SDKs work unchanged:
 Old tools (`list_figma_frames`, `get_figma_frame`, `get_latest_figma_frame`)
 stay for compatibility. `search_nodes` is a new bridge-side index (name,
 text content, node type over all stored frames).
+
+**Shipped:** all seven tools live, REST-shaped, `fileKey` optional everywhere
+(defaults to the most recently pulled file — an agent mid-session should not
+have to know the key). `search_nodes` lives in `lib/search.ts` (unit-tested:
+name/text/type matching, AND-combination, caps, previews). The nodes route
+and the images route were factored into shared cores (`resolveFramesForIds`,
+`exportImagesForKey`) so HTTP and MCP serve identical bytes. `get_selection`
+returns a REST-shaped nodes response and stores the picked subtrees so
+follow-up `get_nodes`/`get_file` see them. One real protocol bug found on the
+way: bridge diagnostics used `console.log` — **stdout is the JSON-RPC channel
+for an MCP client**, so any `[req]` log line would have corrupted the
+protocol; all diagnostics now go to stderr. Verified end-to-end with a stdio
+smoke client (handshake → tools/list → all seven tools, including a live
+inner-node pull and an SVG export): 24/24 checks pass.
 
 ## Round 9 — DX & open-source hardening
 

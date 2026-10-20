@@ -57,6 +57,29 @@ Find your file's local key via `curl http://127.0.0.1:3001/api/page-index`.
 Also: `?fresh=1` to force re-extraction (extension), and `_figmaAgent.svgBase64`
 on shape nodes — inline SVG exports, which the real REST API cannot do at all.
 
+## MCP server
+
+The same bridge process doubles as an MCP server on stdio — spawn it with an
+MCP client and the design is directly tool-accessible, no HTTP needed:
+
+```json
+{ "mcpServers": { "figma": { "command": "npx", "args": ["tsx", "bridge-server.ts"] } } }
+```
+
+| Tool | Maps to | Note |
+|---|---|---|
+| `get_file` | `GET /v1/files/:key` | Whole document tree; `fileKey` optional (defaults to the most recently pulled file), `ids`/`depth` supported |
+| `get_nodes` | `GET /v1/files/:key/nodes` | By id; unstored ids are live-pulled from the plugin |
+| `get_images` | `GET /v1/images/:key` | PNG/JPG/SVG/PDF — SVG and PDF supersede REST here; URLs are served by the bridge and never expire |
+| `get_metadata` | file-level maps | `components`, `componentSets`, `styles` — the design tokens |
+| `get_selection` | selection command | The differentiator: "grab what I selected" |
+| `search_nodes` | — | Name/text/type search over the stored design — REST has no equivalent |
+| `request_from_figma` | command queue | Fresh pulls on demand (`page-index`, `frame`, `selection`, `export`) |
+
+The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
+`get_latest_figma_frame`) remain for compatibility. Returns are REST-shaped,
+so prompts and SDKs written against the Figma REST API work unchanged.
+
 ## Font metrics (line heights)
 
 REST computes intrinsic `lineHeightPx` from real font metrics server-side —

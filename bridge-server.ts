@@ -44,6 +44,7 @@ import {
   type StoredFrame,
   type StoredPageIndex,
 } from "./lib/stitch.js";
+import { searchNodes } from "./lib/search.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
@@ -55,6 +56,11 @@ import {
   writeLibraryHarvest,
   writeRestBootstrap,
 } from "./lib/library-harvest.js";
+
+/** Diagnostics must never touch stdout: when spawned by an MCP client,
+ *  stdout IS the JSON-RPC channel and any stray log line corrupts the
+ *  protocol. Everything goes to stderr (the dev workflow tees stderr). */
+const log = (...args: unknown[]) => console.error(...args);
 
 const HOST = process.env.BRIDGE_HOST ?? "127.0.0.1"; // numeric literal — never '0.0.0.0'
 const PORT = Number(process.env.BRIDGE_PORT ?? 3002);
@@ -104,7 +110,7 @@ function refreshLibraryIndexIfStale(): void {
       LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
       TRANSITION_TABLES.clear();
       LIB_INDEX_LOADED_AT = Date.now();
-      console.log("[bridge] library index reloaded (harvest/bootstrap newer than the in-memory index)");
+      log("[bridge] library index reloaded (harvest/bootstrap newer than the in-memory index)");
     }
   } catch {
     /* no store/libraries yet */
@@ -171,7 +177,7 @@ function savePageIndex(payload: StoredPageIndex & Record<string, unknown>): void
     const harvest = writeLibraryHarvest(LIBRARIES_DIR, payload.fileKey, payload.styles as Record<string, any>);
     if (harvest) {
       LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
-      console.log(
+      log(
         `[bridge] library harvest: ${payload.fileKey} — ${Object.keys(harvest.styles).length} styles`,
       );
     }
@@ -364,7 +370,7 @@ function createCommand(type: string, params: any): AgentCommand | null {
     createdAt: Date.now(),
   };
   commands.set(id, cmd);
-  console.log(`[bridge] command queued: ${type}${params?.id ? ` ${params.id}` : ""} (${id})`);
+  log(`[bridge] command queued: ${type}${params?.id ? ` ${params.id}` : ""} (${id})`);
   return cmd;
 }
 
@@ -383,7 +389,7 @@ function persistResult(cmd: AgentCommand, payload: any): void {
       path.join(STORE_DIR, "font-metrics.json"),
       JSON.stringify(FONT_METRICS, null, 2) + "\n",
     );
-    console.log(
+    log(
       `[fonts] probe merged: added [${report.added
         .map((a) => `${a.family}=${a.multiplier.toPrecision(10)}${a.exact ? " (exact)" : ` ±${a.precision.toExponential(1)}`}`)
         .join(", ") || "-"}]` +
@@ -478,11 +484,11 @@ async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
       headers: { "X-Figma-Token": token },
     });
     if (res.status === 429) {
-      console.log("[bridge] rest-bootstrap skipped: rate-limited (429) — harvest/unresolved path stays active");
+      log("[bridge] rest-bootstrap skipped: rate-limited (429) — harvest/unresolved path stays active");
       return;
     }
     if (!res.ok) {
-      console.log(`[bridge] rest-bootstrap skipped: Figma API ${res.status}`);
+      log(`[bridge] rest-bootstrap skipped: Figma API ${res.status}`);
       return;
     }
     const env = (await res.json()) as { styles?: Record<string, any>; document?: unknown };
@@ -490,14 +496,14 @@ async function autoBootstrapLibraryStyles(localKey: string): Promise<void> {
     if (harvest) {
       LIB_INDEX = loadLibraryIndex(LIBRARIES_DIR);
       TRANSITION_TABLES.clear();
-      console.log(
+      log(
         `[bridge] rest-bootstrap: ${realKey} — ${Object.keys(harvest.styles).length} style ids` +
           (harvest.transitions ? `, ${Object.keys(harvest.transitions).length} transitions` : "") +
           " joined",
       );
     }
   } catch (e) {
-    console.log(`[bridge] rest-bootstrap failed (offline?): ${String(e)}`);
+    log(`[bridge] rest-bootstrap failed (offline?): ${String(e)}`);
   }
 }
 
@@ -568,7 +574,7 @@ app.use((req, res, next) => {
   const start = Date.now();
   res.on("finish", () => {
     if (req.path === "/api/agent/commands/pending") return;
-    console.log(`[req] ${req.method} ${req.originalUrl} → ${res.statusCode} ${Date.now() - start}ms`);
+    log(`[req] ${req.method} ${req.originalUrl} → ${res.statusCode} ${Date.now() - start}ms`);
   });
   next();
 });
@@ -627,12 +633,12 @@ app.post("/api/agent/commands/:id/result", (req, res) => {
   if (req.body?.error) {
     cmd.status = "error";
     cmd.error = String(req.body.error);
-    console.log(`[bridge] command failed: ${cmd.type} — ${cmd.error}`);
+    log(`[bridge] command failed: ${cmd.type} — ${cmd.error}`);
   } else {
     cmd.status = "success";
     cmd.result = req.body?.payload;
     persistResult(cmd, cmd.result);
-    console.log(`[bridge] command done: ${cmd.type} (${cmd.id})`);
+    log(`[bridge] command done: ${cmd.type} (${cmd.id})`);
   }
   res.json({ status: "ok" });
 });
@@ -665,7 +671,7 @@ app.post("/api/design-tree", (req, res) => {
     return;
   }
   const saved = frames.map((f: any) => saveFrame(f));
-  console.log(`[bridge] stored ${saved.length} frame(s): ${saved.map((s: any) => s.name).join(", ")}`);
+  log(`[bridge] stored ${saved.length} frame(s): ${saved.map((s: any) => s.name).join(", ")}`);
   res.json({ status: "success", saved });
 });
 
@@ -676,7 +682,7 @@ app.post("/api/page-index", (req, res) => {
   }
   savePageIndex(req.body);
   const n = req.body.pages.reduce((a: number, p: any) => a + (p.children?.length ?? 0), 0);
-  console.log(`[bridge] page index for ${req.body.fileKey}: ${req.body.pages.length} page(s), ${n} frame(s)`);
+  log(`[bridge] page index for ${req.body.fileKey}: ${req.body.pages.length} page(s), ${n} frame(s)`);
   res.json({ status: "success" });
 });
 
@@ -751,6 +757,43 @@ app.get("/v1/files/:key", async (req, res) => {
   }
 });
 
+/** Resolve node ids to stored frames, live-pulling missing ones via the
+ *  plugin (the shared core of `GET /v1/files/:key/nodes` and the MCP
+ *  `get_nodes` tool). Throws BridgeError(404) for anything unresolvable. */
+async function resolveFramesForIds(key: string, ids: string[]): Promise<StoredFrame[]> {
+  const frames: StoredFrame[] = [];
+  for (const id of ids) {
+    let frame = listFramesForFile(key, [id])[0] ?? null;
+    if (!frame && pluginConnected()) {
+      // not stored yet — try pulling it live
+      const payload = await runCommand("frame", { id });
+      if (payload?.id) {
+        persistResult({ type: "frame", id: "" } as AgentCommand, payload);
+        frame = payload;
+      }
+    }
+    if (!frame) {
+      throw new BridgeError(404, `node ${id} not found in file ${key} — send it from the plugin or check the id`);
+    }
+    frames.push(frame);
+  }
+  return frames;
+}
+
+/** The most recently pulled file — the default `fileKey` for the MCP tools
+ *  (an agent mid-session should not have to know the key by heart). */
+function defaultFileKey(): string | null {
+  if (!fs.existsSync(STORE_DIR)) return null;
+  let best: { key: string; mtime: number } | null = null;
+  for (const key of fs.readdirSync(STORE_DIR)) {
+    const file = path.join(storeDir(key), "pages.json");
+    if (!fs.existsSync(file)) continue;
+    const mtime = fs.statSync(file).mtimeMs;
+    if (!best || mtime > best.mtime) best = { key, mtime };
+  }
+  return best?.key ?? null;
+}
+
 app.get("/v1/files/:key/nodes", async (req, res) => {
   const key = req.params.key;
   if (typeof req.query.ids !== "string" || !req.query.ids.trim()) {
@@ -760,23 +803,7 @@ app.get("/v1/files/:key/nodes", async (req, res) => {
   const ids = req.query.ids.split(",").map((s) => s.trim());
   const depth = req.query.depth ? Number(req.query.depth) : undefined;
   try {
-    const frames: StoredFrame[] = [];
-    for (const id of ids) {
-      let frame = listFramesForFile(key, [id])[0] ?? null;
-      if (!frame && pluginConnected()) {
-        // not stored yet — try pulling it live
-        const payload = await runCommand("frame", { id });
-        if (payload?.id) {
-          persistResult({ type: "frame", id: "" } as AgentCommand, payload);
-          frame = payload;
-        }
-      }
-      if (!frame) {
-        restError(res, 404, `node ${id} not found in file ${key} — send it from the plugin or check the id`);
-        return;
-      }
-      frames.push(frame);
-    }
+    const frames = await resolveFramesForIds(key, ids);
     const pages = getPages(key);
     res.json(
       buildNodesResponse(frames, { depth }, pages ? { fileKey: pages.fileKey } : undefined),
@@ -823,7 +850,31 @@ app.get("/v1/images/:key", async (req, res) => {
     return;
   }
   const scale = Number(req.query.scale ?? 2);
+  try {
+    const images = await exportImagesForKey(key, ids, format, scale);
+    res.json({ images, err: null });
+  } catch (e) {
+    if (e instanceof BridgeError) {
+      restError(res, e.status, e.message);
+      return;
+    }
+    restError(res, 500, (e as Error).message);
+  }
+});
 
+/**
+ * Export node images (the shared core of `GET /v1/images/:key` and the MCP
+ * `get_images` tool): cached asset → serve; else plugin `exportAsync` →
+ * cache → serve; else null. Returns the REST `{ [id]: url | null }` map.
+ * SVG/PDF work here although REST's /v1/images cannot produce them (the
+ * plugin's exportAsync can) — a superset, documented in the README.
+ */
+async function exportImagesForKey(
+  key: string,
+  ids: string[],
+  format: string,
+  scale: number,
+): Promise<Record<string, string | null>> {
   const images: Record<string, string | null> = {};
   for (const id of ids) {
     const cached = assetPath(key, id, format);
@@ -847,8 +898,8 @@ app.get("/v1/images/:key", async (req, res) => {
     }
     images[id] = null;
   }
-  res.json({ images, err: null });
-});
+  return images;
+}
 
 app.get("/assets/:key/:file", (req, res) => {
   const file = path.basename(req.params.file); // no traversal
@@ -934,7 +985,7 @@ app.post("/api/dev/probe-fonts", async (req, res) => {
 // ---------------------------------------------------------------------------
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Figma Agent bridge listening on http://${HOST}:${PORT} (store: ${STORE_DIR})`);
+  log(`Figma Agent bridge listening on http://${HOST}:${PORT} (store: ${STORE_DIR})`);
 });
 
 export { app, server };
@@ -943,7 +994,7 @@ export { app, server };
 // Optional MCP tools (stdio) — registered when spawned by an MCP client.
 // ---------------------------------------------------------------------------
 
-const mcpServer = new Server({ name: "figma-agent-bridge", version: "3.0.0" }, { capabilities: { tools: {} } });
+const mcpServer = new Server({ name: "figma-agent-bridge", version: "3.1.0" }, { capabilities: { tools: {} } });
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -981,6 +1032,80 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
           scale: { type: "number" },
         },
         required: ["type"],
+      },
+    },
+    // --- Round 8: the parity-grade REST-shaped surface -----------------
+    {
+      name: "get_file",
+      description:
+        "GET /v1/files/:key — the whole file as one REST-shaped document tree (pages → frames → nodes), plus the file-level components/componentSets/styles maps. Cached pulls return instantly. Defaults to the most recently pulled file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          ids: { type: "array", items: { type: "string" }, description: "Restrict to these top-level node ids" },
+          depth: { type: "number", description: "Prune the tree below this depth (REST depth semantics)" },
+        },
+      },
+    },
+    {
+      name: "get_nodes",
+      description:
+        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          ids: { type: "array", items: { type: "string" }, description: "Figma node ids, e.g. ['247:448']" },
+          depth: { type: "number", description: "Prune each subtree below this depth (counts from the node)" },
+        },
+        required: ["ids"],
+      },
+    },
+    {
+      name: "get_images",
+      description:
+        "GET /v1/images/:key — render nodes to images (PNG/JPG/SVG/PDF; SVG and PDF supersede REST here) and return {images: {id: url|null}, err: null}. URLs are served by the local bridge and never expire. Cached renders return instantly.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          ids: { type: "array", items: { type: "string" }, description: "Figma node ids to render" },
+          format: { type: "string", enum: ["png", "jpg", "svg", "pdf"], description: "Defaults to png" },
+          scale: { type: "number", description: "Raster scale factor, defaults to 2" },
+        },
+        required: ["ids"],
+      },
+    },
+    {
+      name: "get_metadata",
+      description:
+        "The file's design tokens: the REST-shaped maps of local components, component sets, and paint/text styles (keyed by node id, exactly as in GET /v1/files). Defaults to the most recently pulled file.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+        },
+      },
+    },
+    {
+      name: "get_selection",
+      description:
+        "Whatever is selected in Figma right now, as a REST-shaped nodes response (the differentiator — 'grab what I selected'). Selected subtrees are also stored, so follow-up get_nodes/get_file see them. Requires the plugin open in Figma.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "search_nodes",
+      description:
+        "Search the stored design by node name, TEXT content, and/or node type (REST has no equivalent). Returns matching node ids with their frame and a text preview — feed the ids to get_nodes/get_images.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          query: { type: "string", description: "Case-insensitive substring matched against node names and text content" },
+          type: { type: "string", description: "Node type filter, e.g. 'TEXT', 'INSTANCE', 'frame'" },
+          limit: { type: "number", description: "Match cap (default 50)" },
+        },
       },
     },
   ],
@@ -1027,6 +1152,125 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: `Command timed out: ${c.error}` }] };
       }
       await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  // --- Round 8: parity-grade tools (REST-shaped returns) ---------------
+  if (request.params.name === "get_file") {
+    const args = (request.params.arguments as any) ?? {};
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const pages = getPages(key);
+    if (!pages) {
+      return {
+        content: [{ type: "text", text: `file ${key || "(none)"} not found — no pages stored. Pull first: request_from_figma {type:'page-index'}, then get_file again.` }],
+      };
+    }
+    const ids = Array.isArray(args.ids) ? args.ids.map(String) : undefined;
+    const depth = typeof args.depth === "number" ? args.depth : undefined;
+    const frames = listFramesForFile(key, ids);
+    return { content: [{ type: "text", text: JSON.stringify(buildFileEnvelope(pages, frames, { ids, depth })) }] };
+  }
+  if (request.params.name === "get_nodes") {
+    const args = (request.params.arguments as any) ?? {};
+    const ids = Array.isArray(args.ids) ? args.ids.map(String) : [];
+    if (!ids.length) {
+      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }] };
+    }
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const depth = typeof args.depth === "number" ? args.depth : undefined;
+    try {
+      const frames = await resolveFramesForIds(key, ids);
+      const pages = getPages(key);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(buildNodesResponse(frames, { depth }, pages ? { fileKey: pages.fileKey } : undefined)),
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+    }
+  }
+  if (request.params.name === "get_images") {
+    const args = (request.params.arguments as any) ?? {};
+    const ids = Array.isArray(args.ids) ? args.ids.map(String) : [];
+    if (!ids.length) {
+      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }] };
+    }
+    const format = String(args.format ?? "png").toLowerCase();
+    if (!CONTENT_TYPES[format]) {
+      return { content: [{ type: "text", text: `Error: format must be one of ${Object.keys(CONTENT_TYPES).join(", ")}` }] };
+    }
+    const scale = Number(args.scale ?? 2);
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const images = await exportImagesForKey(key, ids, format, scale);
+    return { content: [{ type: "text", text: JSON.stringify({ images, err: null }) }] };
+  }
+  if (request.params.name === "get_metadata") {
+    const args = (request.params.arguments as any) ?? {};
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const frames = listFramesForFile(key);
+    if (!frames.length) {
+      return {
+        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+      };
+    }
+    const components: Record<string, unknown> = {};
+    const componentSets: Record<string, unknown> = {};
+    const styles: Record<string, unknown> = {};
+    for (const f of frames) {
+      Object.assign(components, f.components ?? {});
+      Object.assign(componentSets, f.componentSets ?? {});
+      Object.assign(styles, f.styles ?? {});
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ components, componentSets, styles }) }] };
+  }
+  if (request.params.name === "get_selection") {
+    if (!pluginConnected()) {
+      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }] };
+    }
+    try {
+      const picked = await runCommand("selection", {});
+      const frames = Array.isArray(picked) ? picked : [];
+      if (!frames.length) {
+        return { content: [{ type: "text", text: "Error: nothing is selected in Figma." }] };
+      }
+      // store the picked subtrees so follow-up get_nodes/get_file see them
+      for (const f of frames) {
+        if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
+      }
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(buildNodesResponse(frames, {}, { fileKey: frames[0]?.fileKey ?? "selection" })),
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+    }
+  }
+  if (request.params.name === "search_nodes") {
+    const args = (request.params.arguments as any) ?? {};
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const frames = listFramesForFile(key);
+    if (!frames.length) {
+      return {
+        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+      };
+    }
+    try {
+      const hits = searchNodes(frames, {
+        query: args.query,
+        type: args.type,
+        limit: typeof args.limit === "number" ? args.limit : undefined,
+      });
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ fileKey: key, count: hits.length, nodes: hits }),
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
     }
   }
   throw new Error("Tool not found");
