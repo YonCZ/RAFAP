@@ -812,6 +812,20 @@ One-command setup, the `restart-plugin.sh` flow documented, README refresh
 gate (fixtures cached — it's free), Community listing. H1–H10 stay
 mine-first: implement only when a real file actually uses a surface.
 
+**Started (2026-10-23): RAFAP is now a registered OpenCode MCP server.**
+`opencode mcp add figma --global` (README has the exact command) — the
+service spawns the bridge automatically, tools surface as
+`figma.get_file`/`figma.search_nodes`/… in every session, and the plugin
+keeps talking to port 3002. This exposed the multi-instance problem — the
+service spawns one bridge per connection (status checks vs session tools),
+and only the port owner talked to the plugin. Fixed with **follower
+mode**: port-loser instances serve REST/MCP from the shared store and
+delegate live plugin commands to the owner (`POST /api/agent/run`,
+30s takeover retry if the owner exits). Verified live through a follower
+instance in-session: get_selection (Code Mode → follower → owner →
+plugin → Figma → back) and the agent/run endpoint. README documents the
+registration and follower mode.
+
 
 ---
 
