@@ -80,6 +80,25 @@ The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
 `get_latest_figma_frame`) remain for compatibility. Returns are REST-shaped,
 so prompts and SDKs written against the Figma REST API work unchanged.
 
+**With OpenCode** (V2), one command registers the bridge for every project:
+
+```sh
+opencode mcp add figma --global -- <path-to-repo>/node_modules/.bin/tsx <path-to-repo>/bridge-server.ts
+opencode mcp list   # → ✓ figma connected
+```
+
+The OpenCode service then spawns the bridge automatically and its tools
+appear as `figma.get_file`, `figma.search_nodes`, … The plugin keeps
+talking to port 3002, so the OpenCode-spawned bridge should be the only
+one running (`npm run start:dev` would race it — see below).
+
+**Multiple bridge processes are safe.** If a second process finds port 3002
+taken (e.g. an MCP status check spawns one while a session's instance
+holds it), it runs in *follower mode*: REST/MCP serve from the shared
+store, and live plugin commands are delegated to the port owner over
+localhost HTTP (`POST /api/agent/run`). Followers retry the port every 30s
+and take over if the owner exits — no manual babysitting.
+
 ## Font metrics (line heights)
 
 REST computes intrinsic `lineHeightPx` from real font metrics server-side —

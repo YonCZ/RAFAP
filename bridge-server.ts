@@ -341,6 +341,16 @@ let lastPluginSeen = 0;
 const COMMAND_TIMEOUT_MS = 20_000;
 const LONG_POLL_MS = 10_000;
 
+/**
+ * Follower mode: when multiple bridge processes share one store (e.g. an
+ * MCP client spawns one while another already holds the plugin port), only
+ * the process that owns HTTP port PORT talks to the Figma plugin. The
+ * others serve REST/MCP from the shared store and DELEGATE live plugin
+ * commands to the owner over localhost HTTP. A 30s retry takes the port
+ * over if the owner exits.
+ */
+let httpPortOwned = false;
+
 function pluginConnected(): boolean {
   return Date.now() - lastPluginSeen < 5000;
 }
@@ -406,6 +416,33 @@ function persistResult(cmd: AgentCommand, payload: any): void {
 
 /** Queue a command and wait for the plugin to execute it. */
 async function runCommand(type: string, params: any, timeoutMs = 25_000): Promise<any> {
+  if (!httpPortOwned) {
+    // Follower mode: the plugin only talks to whichever bridge owns the
+    // port, so delegate the command over localhost HTTP (the owner runs
+    // the queue and returns the result). See POST /api/agent/run.
+    let res: Response;
+    try {
+      res = await fetch(`${BASE}/api/agent/run`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, params, timeoutMs }),
+        signal: AbortSignal.timeout(timeoutMs + 10_000),
+      });
+    } catch (e) {
+      throw new BridgeError(
+        502,
+        `the bridge owning port ${PORT} is unreachable (${(e as Error).message}) — is it still running?`,
+      );
+    }
+    const data: any = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 404) {
+        throw new BridgeError(502, `the process on port ${PORT} is not a RAFAP bridge (404 on /api/agent/run)`);
+      }
+      throw new BridgeError(res.status, data?.error ?? "the port-owning bridge rejected the command");
+    }
+    return data.result;
+  }
   if (!pluginConnected()) {
     throw new BridgeError(503, "plugin not connected — open the Figma Agent plugin in Figma");
   }
@@ -420,7 +457,9 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
     }
     if (Date.now() - start > timeoutMs) {
       c.status = "timeout";
-      c.error = "plugin did not respond in time";
+      c.error =
+        "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible " +
+        "(a minimized or backgrounded window throttles the plugin)?";
       throw new BridgeError(504, `command timed out: ${c.error}`);
     }
     await sleep(150);
@@ -624,6 +663,27 @@ app.get("/api/agent/commands/pending", async (_req, res) => {
   }
 });
 
+/** Follower-mode counterpart of runCommand: another bridge (one that lost
+ *  the port race) delegates its live plugin commands here. The request
+ *  blocks until the plugin executes the command (or times out). */
+app.post("/api/agent/run", async (req, res) => {
+  const { type, params, timeoutMs } = req.body ?? {};
+  try {
+    const result = await runCommand(
+      String(type ?? ""),
+      params ?? {},
+      typeof timeoutMs === "number" ? Math.max(1_000, Math.min(timeoutMs, 120_000)) : 25_000,
+    );
+    res.json({ result });
+  } catch (e) {
+    if (e instanceof BridgeError) {
+      restError(res, e.status, e.message);
+      return;
+    }
+    restError(res, 500, (e as Error).message);
+  }
+});
+
 app.post("/api/agent/commands/:id/result", (req, res) => {
   const cmd = commands.get(req.params.id);
   if (!cmd) {
@@ -764,7 +824,7 @@ async function resolveFramesForIds(key: string, ids: string[]): Promise<StoredFr
   const frames: StoredFrame[] = [];
   for (const id of ids) {
     let frame = listFramesForFile(key, [id])[0] ?? null;
-    if (!frame && pluginConnected()) {
+    if (!frame && (pluginConnected() || !httpPortOwned)) {
       // not stored yet — try pulling it live
       const payload = await runCommand("frame", { id });
       if (payload?.id) {
@@ -882,7 +942,7 @@ async function exportImagesForKey(
       images[id] = assetUrl(key, id, format);
       continue;
     }
-    if (pluginConnected()) {
+    if (pluginConnected() || !httpPortOwned) {
       try {
         const result = await runCommand("export", { ids: [id], format: format.toUpperCase(), scale });
         const b64 = result?.images?.[id];
@@ -984,9 +1044,29 @@ app.post("/api/dev/probe-fonts", async (req, res) => {
 
 // ---------------------------------------------------------------------------
 
-const server = app.listen(PORT, HOST, () => {
-  log(`Figma Agent bridge listening on http://${HOST}:${PORT} (store: ${STORE_DIR})`);
-});
+function startHttpListener(): void {
+  const srv = app.listen(PORT, HOST, () => {
+    httpPortOwned = true;
+    log(`Figma Agent bridge listening on http://${HOST}:${PORT} (store: ${STORE_DIR})`);
+  });
+  srv.on("error", (e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") {
+      httpPortOwned = false;
+      log(
+        `[bridge] port ${PORT} is owned by another bridge — following it: REST/MCP serve ` +
+          `from the shared store, live plugin commands are delegated to the owner. ` +
+          `Retrying every 30s to take over if it exits.`,
+      );
+      setTimeout(startHttpListener, 30_000);
+    } else {
+      log(`[bridge] HTTP server error: ${e.code ?? "unknown"} — ${e.message}`);
+    }
+  });
+  server = srv;
+}
+
+let server: ReturnType<typeof app.listen>;
+startHttpListener();
 
 export { app, server };
 
@@ -1132,26 +1212,16 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (request.params.name === "request_from_figma") {
     const args = (request.params.arguments as any) ?? {};
-    const cmd = createCommand(args.type, args);
-    if (cmd === null) {
+    if (!createCommand(String(args.type ?? ""), args)) {
       return {
         content: [{ type: "text", text: "Invalid request — need {type:'page-index'|'selection'} or {type:'frame', id:'…'} or {type:'export', ids:[…]}" }],
       };
     }
-    const start = Date.now();
-    for (;;) {
-      const c = commands.get(cmd.id);
-      if (!c) break;
-      if (c.status === "success") return { content: [{ type: "text", text: JSON.stringify(c.result) }] };
-      if (c.status === "error" || c.status === "timeout") {
-        return { content: [{ type: "text", text: `Command failed: ${c.error}` }] };
-      }
-      if (Date.now() - start > 25000) {
-        c.status = "timeout";
-        c.error = "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible (a minimized or backgrounded window throttles the plugin)?";
-        return { content: [{ type: "text", text: `Command timed out: ${c.error}` }] };
-      }
-      await new Promise((r) => setTimeout(r, 250));
+    try {
+      const result = await runCommand(String(args.type ?? ""), args);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Command failed: ${(e as Error).message}` }] };
     }
   }
   // --- Round 8: parity-grade tools (REST-shaped returns) ---------------
@@ -1225,7 +1295,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: JSON.stringify({ components, componentSets, styles }) }] };
   }
   if (request.params.name === "get_selection") {
-    if (!pluginConnected()) {
+    if (!pluginConnected() && httpPortOwned) {
       return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }] };
     }
     try {
