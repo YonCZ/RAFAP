@@ -4,7 +4,7 @@ A local **drop-in replacement for the Figma REST API** (`GET /v1/files/:key`,
 `GET /v1/files/:key/nodes`): a Figma plugin + loopback bridge server that
 serves your open Figma file through an API-shaped surface with **no rate
 limits, no tokens, and no cloud round-trips**. Point any Figma REST client at
-`http://127.0.0.1:3001/v1` and it just works.
+`http://127.0.0.1:3002/v1` and it just works.
 
 Built for AI agents and local tooling that keep hitting Figma's API rate
 limits while iterating on design data.
@@ -12,7 +12,7 @@ limits while iterating on design data.
 ## How it works
 
 ```
-Figma desktop app ── plugin (long-poll) ──> bridge server (127.0.0.1:3001)
+Figma desktop app ── plugin (long-poll) ──> bridge server (127.0.0.1:3002)
                                                 │
 REST clients / agents ── GET /v1/files/... ──────┘
 ```
@@ -28,21 +28,51 @@ REST clients / agents ── GET /v1/files/... ──────┘
 
 ## Quick start
 
+One command (installs, typechecks, builds the plugin, prints the rest):
+
+```bash
+bash scripts/setup.sh
+```
+
+Or step by step:
+
 ```bash
 npm install
 npm run check          # typecheck bridge + plugin
 npm run build:plugin   # bundle the plugin to dist/plugin/
-npm start              # bridge on 127.0.0.1:3001
+npm start              # bridge on http://127.0.0.1:3002
 ```
 
 Then in Figma: **Plugins → Development → Import plugin from manifest…** and
-select `dist/plugin/manifest.json`. Open the plugin, and:
+select `dist/plugin/manifest.json`. Open the plugin (keep its panel open —
+it is the bridge's connection to Figma), and:
 
 ```bash
-curl http://127.0.0.1:3001/v1/files/local-<key>
+curl http://127.0.0.1:3002/api/page-index   # find your file's local key
+curl "http://127.0.0.1:3002/v1/files/local-<key>?fresh=1"
 ```
 
-Find your file's local key via `curl http://127.0.0.1:3001/api/page-index`.
+To use it from your AI tooling, register it with OpenCode (see
+[MCP server](#mcp-server) — every session then gets `get_file`,
+`search_nodes`, `get_selection`, …).
+
+## Troubleshooting
+
+- **"plugin did not respond in time"** — a backgrounded or minimized Figma
+  window throttles the plugin iframe. Keep Figma visible on the current
+  Space during pulls (this is Figma's throttling, not the bridge's).
+- **"plugin not connected"** — open the **Figma Agent** panel in Figma;
+  it reconnects on its own within seconds of the bridge starting.
+- **Port 3002 is busy** — another bridge owns it (e.g. one spawned by
+  OpenCode). A second process is harmless: it runs in *follower mode*,
+  serving from the shared store and delegating live commands to the owner.
+  Run only one if you can (`opencode service restart` cleans up OpenCode's
+  spawns).
+- **"node X not found in this file"** — the plugin operates on the file
+  that is *open* in Figma. Open the file the node belongs to.
+- After changing plugin code: `npm run publish`, then
+  `npm run plugin:reload` to reopen it in Figma without re-importing
+  (macOS, needs Accessibility permission for your terminal).
 
 ## API surface
 
@@ -112,7 +142,7 @@ float32 parity** with REST's `lineHeightPx` (e.g. Space Grotesk —
 To close a family the table doesn't know (any font used in the open file):
 
 ```bash
-curl -X POST http://127.0.0.1:3001/api/dev/probe-fonts
+curl -X POST http://127.0.0.1:3002/api/dev/probe-fonts
 ```
 
 This asks the open plugin to measure the file's fonts with a scratch text
@@ -156,9 +186,22 @@ plugin-API limits. See `report.md` and `docs/rest-parity-deviations.md`.
 ## Development
 
 ```bash
-npm run check    # tsc for bridge + plugin
-npm test         # vitest unit tests (mapping rules)
+npm run check    # tsc for bridge + plugin (CI runs this on every push)
+npm test         # vitest unit tests (mapping rules, metrics, harness)
 npm run publish  # sync build to a dev plugin folder
+npm run plugin:reload  # reopen the plugin in Figma (macOS reload dance)
 ```
+
+The **regression gate** is two-layered: CI (`check` + tests, on every push)
+and the local **golden-diff scorecard** — its fixtures are real-design REST
+snapshots that stay on the machine that measured them (gitignored by
+design, cached, no API calls), so after touching mapping or normalization
+code run:
+
+```bash
+npx tsx tools/golden-diff.ts --mode scorecard
+```
+
+and compare against the fidelity numbers above before pushing.
 
 `agent.md` is the spec of record. MIT licensed — see `LICENSE`.

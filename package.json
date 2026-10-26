@@ -6,6 +6,8 @@
   "scripts": {
     "start": "tsx bridge-server.ts",
     "start:dev": "BRIDGE_PORT=3002 tsx bridge-server.ts",
+    "setup": "bash scripts/setup.sh",
+    "plugin:reload": "bash scripts/restart-plugin.sh",
     "check": "tsc -p tsconfig.json && tsc -p plugin/tsconfig.json",
     "build:plugin": "esbuild plugin/code.ts --bundle --format=iife --outfile=dist/plugin/code.js && cp plugin/ui.html plugin/manifest.json dist/plugin/",
     "test": "vitest run",

@@ -826,6 +826,28 @@ instance in-session: get_selection (Code Mode → follower → owner →
 plugin → Figma → back) and the agent/run endpoint. README documents the
 registration and follower mode.
 
+**Completed (2026-10-26): the DX hardening items.**
+- `scripts/setup.sh` — one-command setup (node check → install →
+  typecheck → plugin build → printed next steps with real paths), exposed
+  as `npm run setup`; verified end-to-end.
+- `scripts/restart-plugin.sh` — the reload dance as `npm run plugin:reload`
+  (reopens the dev plugin in Figma after `npm run publish`; macOS +
+  Accessibility permission documented).
+- `.github/workflows/ci.yml` — CI regression gate: npm ci →
+  `npm run check` → `npm test` on Node 22, every push/PR. The golden-diff
+  scorecard is documented as the *local* second gate (its fixtures are
+  real-design data, gitignored by design, cached so it's free and makes
+  no API calls).
+- README refresh for first-time users: corrected Quick start (the old one
+  still said port 3001), a Troubleshooting section (window throttling,
+  plugin-not-connected, port conflicts → follower mode, wrong-file node
+  pulls), the OpenCode/MCP registration, and the two-layer regression
+  gate.
+- `docs/community-listing.md` — draft Figma Community listing copy
+  (tagline, description, how-it-works, reviewer notes: localhost-only
+  network access, no tokens/telemetry). The actual listing publish is a
+  human action (your Figma account).
+
 
 ---
 

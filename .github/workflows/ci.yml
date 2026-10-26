@@ -1,0 +1,43 @@
+# RAFAP CI — the regression gate.
+#
+# What runs here: install → typecheck (bridge + plugin) → unit tests.
+# The 130-test suite covers the REST mapping rules, the font-metrics
+# estimator/rewriter (including the degradation ladder), the diff-harness
+# normalization/semanticization, the library join, and search.
+#
+# What deliberately does NOT run here: `tools/golden-diff.ts`. Its fixtures
+# are real-design REST snapshots and are gitignored by design (they stay
+# on the machine that measured them, where they are cached — so the local
+# scorecard is free and makes no API calls). Run it locally after touching
+# mapping or normalization code:
+#
+#     npx tsx tools/golden-diff.ts --mode scorecard
+#
+# and compare against the README's fidelity numbers before pushing.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck (bridge + plugin)
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
