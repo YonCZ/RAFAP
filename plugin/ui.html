@@ -2,37 +2,30 @@
 <html>
 <head>
   <style>
-    body { font-family: sans-serif; padding: 16px; background: #1e1e1e; color: #fff; text-align: center; }
-    button { background: #0D99FF; color: white; border: none; padding: 10px 16px; border-radius: 6px; cursor: pointer; font-weight: bold; width: 100%; margin-top: 6px; }
-    button:hover { background: #0b82db; }
-    button.secondary { background: #2d2d2d; border: 1px solid #555; }
-    button.secondary:hover { background: #3a3a3a; }
-    #status { margin-top: 10px; font-size: 12px; color: #aaa; white-space: pre-line; min-height: 16px; }
-    #conn { margin-top: 6px; font-size: 11px; }
-    h3 { margin: 0 0 8px; font-size: 14px; }
+    /* Minimalistic two-line panel: connection status + what is being sent.
+       Everything else (buttons, title) was removed — the command queue
+       makes manual sends unnecessary, and a small window does not eat
+       canvas space. Keep the window small in code.ts (figma.showUI). */
+    body { font-family: sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 7px 9px; }
+    div { font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #conn { color: #bbb; }
+    #status { color: #888; margin-top: 2px; }
+    #status.ok { color: #7ee787; }
+    #status.err { color: #ff7b72; }
   </style>
 </head>
 <body>
-  <h3>Figma Agent</h3>
   <div id="conn">connecting…</div>
-  <button id="send-btn">Send Selected Frame(s)</button>
-  <button id="index-btn" class="secondary">Send Page Index</button>
-  <div id="status">Ready</div>
+  <div id="status">idle</div>
 
   <script>
     const BRIDGE = "http://localhost:3002";
-    const status = (t) => { document.getElementById("status").innerText = t; };
+    const status = (t, cls) => {
+      const el = document.getElementById("status");
+      el.innerText = t.length > 60 ? t.slice(0, 59) + "…" : t;
+      el.className = cls ?? "";
+    };
     const conn = (t) => { document.getElementById("conn").innerText = t; };
-
-    // --- manual buttons (fallback) ---------------------------------------
-    document.getElementById("send-btn").onclick = () => {
-      status("Sending...");
-      parent.postMessage({ pluginMessage: { type: "export-selection" } }, "*");
-    };
-    document.getElementById("index-btn").onclick = () => {
-      status("Sending page index...");
-      parent.postMessage({ pluginMessage: { type: "export-page-index" } }, "*");
-    };
 
     // --- agent command loop (long-poll) -----------------------------------
     // The bridge HOLDS each request up to ~10s until a command arrives, so
@@ -41,16 +34,16 @@
     const knownCommands = {}; // commandId -> type (for status display)
 
     async function deliverResult(msg) {
+      const label = knownCommands[msg.commandId] || "command";
       try {
         await fetch(BRIDGE + "/api/agent/commands/" + msg.commandId + "/result", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(msg.error ? { error: msg.error } : { payload: msg.payload }),
         });
-        const label = knownCommands[msg.commandId] || "command";
-        status(msg.error ? "❌ " + msg.error : "✅ Sent to agent: " + label);
+        status(msg.error ? "✗ " + label + ": " + msg.error : "✓ sent " + label, msg.error ? "err" : "ok");
       } catch {
-        status("❌ Bridge unreachable while delivering result");
+        status("✗ bridge unreachable while delivering " + label, "err");
       }
     }
 
@@ -59,10 +52,11 @@
         try {
           const res = await fetch(BRIDGE + "/api/agent/commands/pending");
           const data = await res.json();
-          conn("🟢 connected — listening for agent");
+          conn("● connected");
           if (data.command) {
             knownCommands[data.command.id] =
               data.command.type + (data.command.params?.id ? " " + data.command.params.id : "");
+            status("→ " + knownCommands[data.command.id]);
             parent.postMessage({
               pluginMessage: {
                 type: "agent-command",
@@ -74,7 +68,7 @@
           }
           // no sleep needed on success — the long-poll itself paces the loop
         } catch {
-          conn("🔴 bridge offline — retrying");
+          conn("○ bridge offline — retrying");
           await new Promise((r) => setTimeout(r, 1500));
         }
       }
@@ -99,12 +93,12 @@
           });
           if (res.ok) {
             const data = await res.json();
-            status("✅ Stored " + data.saved.map(f => f.name).join(", "));
+            status("✓ stored " + data.saved.map(f => f.name).join(", "), "ok");
           } else {
-            status("❌ Server error response.");
+            status("✗ server error response", "err");
           }
         } catch (err) {
-          status("❌ Is the bridge running on port 3002? (npm run start:dev)");
+          status("✗ bridge offline (port 3002)", "err");
         }
       }
 
@@ -116,9 +110,9 @@
             body: JSON.stringify(msg.payload),
           });
           const n = (msg.payload.pages || []).reduce((a, p) => a + (p.children || []).length, 0);
-          status(res.ok ? "✅ Page index stored (" + n + " frames)" : "❌ Server error response.");
+          status(res.ok ? "✓ " + n + " frames indexed" : "✗ server error response", res.ok ? "ok" : "err");
         } catch (err) {
-          status("❌ Is the bridge running on port 3002? (npm run start:dev)");
+          status("✗ bridge offline (port 3002)", "err");
         }
       }
     };

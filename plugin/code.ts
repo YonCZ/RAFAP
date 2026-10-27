@@ -34,11 +34,11 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.7.0";
+const PLUGIN_VERSION = "3.8.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
-figma.showUI(__html__, { width: 340, height: 300 });
+figma.showUI(__html__, { width: 220, height: 52 });
 
 // ---------------------------------------------------------------------------
 // postMessage plumbing — symbols (figma.mixed) cannot cross postMessage;
