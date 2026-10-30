@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.8.0";
+const PLUGIN_VERSION = "3.8.1";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 

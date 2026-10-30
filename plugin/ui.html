@@ -8,7 +8,9 @@
        canvas space. Keep the window small in code.ts (figma.showUI). */
     body { font-family: sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 7px 9px; }
     div { font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    #conn { color: #bbb; }
+    #conn.on  { color: #7ee787; }   /* green — bridge connected */
+    #conn.off { color: #ff7b72; }   /* red — bridge offline */
+    #conn { color: #bbb; }          /* connecting… */
     #status { color: #888; margin-top: 2px; }
     #status.ok { color: #7ee787; }
     #status.err { color: #ff7b72; }
@@ -25,7 +27,11 @@
       el.innerText = t.length > 60 ? t.slice(0, 59) + "…" : t;
       el.className = cls ?? "";
     };
-    const conn = (t) => { document.getElementById("conn").innerText = t; };
+    const conn = (t, cls) => {
+      const el = document.getElementById("conn");
+      el.innerText = t;
+      el.className = cls ?? "";
+    };
 
     // --- agent command loop (long-poll) -----------------------------------
     // The bridge HOLDS each request up to ~10s until a command arrives, so
@@ -52,7 +58,7 @@
         try {
           const res = await fetch(BRIDGE + "/api/agent/commands/pending");
           const data = await res.json();
-          conn("● connected");
+          conn("● bridge online", "on");
           if (data.command) {
             knownCommands[data.command.id] =
               data.command.type + (data.command.params?.id ? " " + data.command.params.id : "");
@@ -68,7 +74,7 @@
           }
           // no sleep needed on success — the long-poll itself paces the loop
         } catch {
-          conn("○ bridge offline — retrying");
+          conn("● bridge offline — retrying", "off");
           await new Promise((r) => setTimeout(r, 1500));
         }
       }
