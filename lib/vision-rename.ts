@@ -203,15 +203,101 @@ export function extractJson(text: string): Record<string, unknown> | null {
 }
 
 /**
+ * Round 13 — salvage complete "id": "name" pairs from a truncated reply.
+ * A reply cut off by max_tokens fails JSON.parse but usually contains
+ * many usable entries; recover them instead of discarding the whole
+ * batch. Only ids we asked about are kept, names sanitized.
+ */
+export function salvagePairs(
+  text: string,
+  knownIds: Set<string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const re = /"([^"\n]{1,60})"\s*:\s*"([^"\n]{1,80})"/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const id = m[1];
+    if (!knownIds.has(id)) continue;
+    const clean = sanitizeName(m[2]);
+    if (clean && !(id in out)) out[id] = clean;
+  }
+  return out;
+}
+
+/**
+ * Max targets per vision call. Larger batches make the model's JSON
+ * reply exceed max_tokens and truncate mid-object (Round 13 field
+ * report: a 131-target frame returned perfectly good names that cut
+ * off at the token limit). The same image is resent per chunk, so a
+ * 131-target frame costs 4 calls instead of 1 — reliability first.
+ */
+export const MAX_TARGETS_PER_VISION_CALL = 40;
+
+/** Append one JSONL line to the vision-rename log; never throws and
+ *  never receives the API key — call sites pass safe fields only. */
+export function appendVisionLog(logPath: string, event: Record<string, unknown>): void {
+  try {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...event }) + "\n");
+  } catch {
+    // logging must never break the rename flow
+  }
+}
+
+/** HTTP error carrying the status, so retries can skip auth errors. */
+class VisionHttpError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+  }
+}
+
+function filterKnownNames(
+  parsed: Record<string, unknown>,
+  targets: RenameTarget[],
+): Record<string, string> {
+  const known = new Set(targets.map((t) => t.id));
+  const out: Record<string, string> = {};
+  for (const [id, name] of Object.entries(parsed)) {
+    const clean = sanitizeName(name);
+    if (known.has(id) && clean && clean !== targets.find((t) => t.id === id)?.currentName) {
+      out[id] = clean;
+    }
+  }
+  return out;
+}
+
+/**
  * Ask the vision model to name the targets, given the rendered frame PNG
  * (base64, no data: prefix) — returns id → name, sanitized and filtered
- * to known target ids. Throws with the endpoint's message on HTTP error.
+ * to known target ids. Batches larger than MAX_TARGETS_PER_VISION_CALL
+ * are split into chunks (same image resent); each chunk retries once on
+ * a no-JSON reply or a 429/5xx, and a truncated reply is salvaged for
+ * its complete pairs. Throws with the endpoint's message on HTTP error.
  */
 export async function suggestNames(
   cfg: VisionConfig,
   imageBase64: string,
   targets: RenameTarget[],
   fetchImpl: typeof fetch = fetch,
+  logPath?: string,
+): Promise<Record<string, string>> {
+  const merged: Record<string, string> = {};
+  const chunkCount = Math.max(1, Math.ceil(targets.length / MAX_TARGETS_PER_VISION_CALL));
+  for (let c = 0; c < chunkCount; c++) {
+    const chunk = targets.slice(c * MAX_TARGETS_PER_VISION_CALL, (c + 1) * MAX_TARGETS_PER_VISION_CALL);
+    Object.assign(merged, await suggestNamesForChunk(cfg, imageBase64, chunk, fetchImpl, logPath, c, chunkCount));
+  }
+  return merged;
+}
+
+async function suggestNamesForChunk(
+  cfg: VisionConfig,
+  imageBase64: string,
+  targets: RenameTarget[],
+  fetchImpl: typeof fetch,
+  logPath: string | undefined,
+  chunkIndex: number,
+  chunkCount: number,
 ): Promise<Record<string, string>> {
   const facts = targets.map((t) => ({
     id: t.id,
@@ -231,40 +317,79 @@ export async function suggestNames(
     "",
     JSON.stringify(facts),
   ].join("\n");
-
-  const res = await fetchImpl(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
-    body: JSON.stringify({
+  const logEvent = (e: Record<string, unknown>) => {
+    if (!logPath) return;
+    appendVisionLog(logPath, {
       model: cfg.model,
-      max_tokens: 2000,
-      messages: [
-        {
-          role: "user",
-          content: [
-            { type: "text", text: prompt },
-            { type: "image_url", image_url: { url: `data:image/png;base64,${imageBase64}` } },
+      source: cfg.source,
+      baseUrlHost: new URL(cfg.baseUrl).host,
+      chunkIndex,
+      chunkCount,
+      chunkTargets: targets.length,
+      imageBytes: imageBase64.length,
+      ...e,
+    });
+  };
+
+  let lastError: Error | null = null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const t0 = Date.now();
+    try {
+      const res = await fetchImpl(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify({
+          model: cfg.model,
+          max_tokens: 3000,
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: prompt },
+                { type: "image_url", image_url: { url: `data:image/png;base64,${imageBase64}` } },
+              ],
+            },
           ],
-        },
-      ],
-    }),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`vision endpoint ${res.status}: ${body.slice(0, 300)}`);
-  }
-  const data: any = await res.json();
-  const message = data?.choices?.[0]?.message ?? {};
-  const content: string = message.content ?? message.reasoning_content ?? "";
-  const parsed = extractJson(String(content));
-  if (!parsed) throw new Error(`vision model returned no JSON object (${String(content).slice(0, 200)})`);
-  const known = new Set(targets.map((t) => t.id));
-  const out: Record<string, string> = {};
-  for (const [id, name] of Object.entries(parsed)) {
-    const clean = sanitizeName(name);
-    if (known.has(id) && clean && clean !== targets.find((t) => t.id === id)?.currentName) {
-      out[id] = clean;
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new VisionHttpError(res.status, `vision endpoint ${res.status}: ${body.slice(0, 300)}`);
+      }
+      const data: any = await res.json();
+      const message = data?.choices?.[0]?.message ?? {};
+      // Empty-string content is NOT nullish — check reasoning_content too
+      // (some endpoints reply reasoning-only with content: "").
+      const content: string = typeof message.content === "string" ? message.content : "";
+      const reasoning: string = typeof message.reasoning_content === "string" ? message.reasoning_content : "";
+      const parsed = extractJson(content) ?? extractJson(reasoning);
+      const names = parsed
+        ? filterKnownNames(parsed, targets)
+        : salvagePairs(content || reasoning, new Set(targets.map((t) => t.id)));
+      logEvent({
+        attempt,
+        ok: Object.keys(names).length > 0,
+        httpStatus: res.status,
+        parsedCount: Object.keys(names).length,
+        contentExcerpt: content.slice(0, 300),
+        reasoningExcerpt: reasoning.slice(0, 300),
+        durationMs: Date.now() - t0,
+      });
+      if (Object.keys(names).length > 0) return names;
+      if (parsed && Object.keys(names).length === 0) {
+        // usable JSON, but nothing survived filtering — nothing to retry
+        return names;
+      }
+      lastError = new Error(`vision model returned no JSON object (${(content || reasoning).slice(0, 200)})`);
+    } catch (e) {
+      // Auth/bad-request errors will not get better with a retry.
+      if (e instanceof VisionHttpError && e.status !== 429 && e.status < 500) {
+        logEvent({ attempt, ok: false, httpStatus: e.status, error: e.message.slice(0, 300), durationMs: Date.now() - t0 });
+        throw e;
+      }
+      lastError = e as Error;
+      logEvent({ attempt, ok: false, error: (e as Error).message.slice(0, 300), durationMs: Date.now() - t0 });
     }
   }
-  return out;
+  throw lastError ?? new Error("vision model failed");
 }

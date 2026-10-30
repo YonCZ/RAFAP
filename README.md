@@ -76,6 +76,13 @@ To use it from your AI tooling, register it with OpenCode (see
   on its own.
 - **"node X not found in this file"** — the plugin operates on the file
   that is *open* in Figma. Open the file the node belongs to.
+- **"vision model returned no JSON"** — the model's reply was truncated or
+  empty. Batches are chunked (≤ 40 layers per vision call), each chunk
+  retried once, and truncated replies are salvaged for their complete
+  entries, so this should be rare. If it persists, check
+  `store/logs/vision-rename.jsonl` — every vision call is logged there
+  (model, chunk sizes, HTTP status, reply excerpts, durations; the API
+  key is never logged).
 - After changing plugin code: `npm run build:plugin`, then
   `npm run plugin:reload` to reopen it in Figma without re-importing
   (macOS, needs Accessibility permission for your terminal).

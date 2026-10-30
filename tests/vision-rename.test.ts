@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   collectRenameTargets,
   extractJson,
@@ -7,6 +10,7 @@ import {
   sanitizeName,
   suggestNames,
   suggestionsToRenames,
+  salvagePairs,
   type RenameTarget,
   type VisionConfig,
 } from "../lib/vision-rename.js";
@@ -188,6 +192,82 @@ describe("suggestNames", () => {
   it("throws when the reply contains no JSON", async () => {
     const f = (async () => okReply("I cannot see images")) as unknown as typeof fetch;
     await expect(suggestNames(cfg, "aGVsbG8=", targets, f)).rejects.toThrow(/no JSON/);
+  });
+});
+
+describe("suggestNames — Round 13 hardening (chunking, retry, salvage, logs)", () => {
+  const cfg: VisionConfig = { baseUrl: "https://llm.example/v1", model: "test-model", apiKey: "sk-secret-abc123", source: "test" };
+  const mkTargets = (n: number): RenameTarget[] =>
+    Array.from({ length: n }, (_, i) => ({ id: `1:${i + 1}`, currentName: `Frame ${i + 1}`, type: "FRAME", width: 100, height: 100, textInside: [] }));
+  const reply = (message: Record<string, unknown>) =>
+    new Response(JSON.stringify({ choices: [{ message }] }), { status: 200 });
+  const contentReply = (content: string) => reply({ content });
+
+  it("splits large batches into chunks of ≤ MAX_TARGETS_PER_VISION_CALL", async () => {
+    const calls: number[] = [];
+    const f = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body));
+      const facts = JSON.parse(body.messages[0].content[0].text.split("\n\n")[1] ?? "[]");
+      calls.push(facts.length);
+      const names = Object.fromEntries(facts.map((t: any) => [t.id, "Named " + t.id]));
+      return contentReply(JSON.stringify(names));
+    }) as unknown as typeof fetch;
+    const out = await suggestNames(cfg, "aGVsbG8=", mkTargets(95), f);
+    expect(calls).toEqual([40, 40, 15]);
+    expect(Object.keys(out)).toHaveLength(95);
+  });
+
+  it("parses reasoning-only replies (content is empty string, not null)", async () => {
+    const f = (async () => reply({ content: "", reasoning_content: '{"1:1": "Top Nav"}' })) as unknown as typeof fetch;
+    expect(await suggestNames(cfg, "aGVsbG8=", mkTargets(1), f)).toEqual({ "1:1": "Top Nav" });
+  });
+
+  it("retries once on a no-JSON reply and succeeds on the second attempt", async () => {
+    let n = 0;
+    const f = (async () => contentReply(++n === 1 ? "hmm I cannot" : '{"1:1": "Top Nav"}')) as unknown as typeof fetch;
+    expect(await suggestNames(cfg, "aGVsbG8=", mkTargets(1), f)).toEqual({ "1:1": "Top Nav" });
+    expect(n).toBe(2);
+  });
+
+  it("does not retry auth errors (4xx)", async () => {
+    let n = 0;
+    const f = (async () => {
+      n++;
+      return new Response("denied", { status: 401 });
+    }) as unknown as typeof fetch;
+    await expect(suggestNames(cfg, "aGVsbG8=", mkTargets(1), f)).rejects.toThrow(/401/);
+    expect(n).toBe(1);
+  });
+
+  it("salvages complete pairs from a truncated reply instead of failing", async () => {
+    const truncated = '{"1:1": "Top Nav", "1:2": "Summ'; // cut at max_tokens
+    const f = (async () => contentReply(truncated)) as unknown as typeof fetch;
+    expect(await suggestNames(cfg, "aGVsbG8=", mkTargets(2), f)).toEqual({ "1:1": "Top Nav" });
+  });
+
+  it("logs each attempt as JSONL without the API key", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vision-log-"));
+    const logPath = path.join(dir, "vision-rename.jsonl");
+    const f = (async () => contentReply('{"1:1": "Top Nav"}')) as unknown as typeof fetch;
+    await suggestNames(cfg, "aGVsbG8=", mkTargets(1), f, logPath);
+    const lines = fs.readFileSync(logPath, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ model: "test-model", ok: true, parsedCount: 1, chunkIndex: 0, chunkCount: 1 });
+    expect(lines[0].contentExcerpt).toContain("Top Nav");
+    expect(fs.readFileSync(logPath, "utf8")).not.toContain("sk-secret-abc123");
+  });
+});
+
+describe("salvagePairs (truncated-reply recovery)", () => {
+  it("keeps only known ids with complete, sanitizable pairs", () => {
+    const text = 'junk ```json\n{"1:1": "Top Nav", "1:2": "Half", "1:3": "Ignored Pair"';
+    const out = salvagePairs(text, new Set(["1:1", "1:2"]));
+    // 1:3 not in known set; "1:3" pair IS complete in text so it is filtered by id
+    expect(out).toEqual({ "1:1": "Top Nav", "1:2": "Half" });
+  });
+
+  it("returns empty when nothing usable is present", () => {
+    expect(salvagePairs("no pairs here", new Set(["1:1"]))).toEqual({});
   });
 });
 

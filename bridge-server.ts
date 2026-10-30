@@ -76,6 +76,8 @@ const PORT = Number(process.env.BRIDGE_PORT ?? 3002);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const STORE_DIR = path.join(ROOT, "store");
+/** Round 13 — vision-rename call log (JSONL; API key never logged). */
+const VISION_LOG = path.join(STORE_DIR, "logs", "vision-rename.jsonl");
 
 /**
  * Round 2 (C1/C3/C4) — corpus-bootstrapped font metrics, built by
@@ -1332,7 +1334,7 @@ async function suggestRenamesForFrames(
       return { suggestions: [], withNames: 0, renderError: `could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` };
     }
     const b64 = fs.readFileSync(asset).toString("base64");
-    const names = await suggestNames(cfg, b64, targets);
+    const names = await suggestNames(cfg, b64, targets, fetch, VISION_LOG);
     for (const t of targets) {
       const suggestedName = names[t.id] ?? null;
       if (suggestedName) withNames++;

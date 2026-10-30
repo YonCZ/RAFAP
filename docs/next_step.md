@@ -988,6 +988,34 @@ Renaming was agent-only (MCP tools). Now the plugin panel has a
   step — safe rails are lazy-names-only scoping and the single undo
   step; scope is selection + descendants, matching the agent flow.
 
+### Round 13.1 — field report: 131-target frame, truncated replies
+
+First live use found the failure mode the shoot-out missed: selecting a
+named top-level frame pulled in **131 lazy descendants at once**, and
+the model's (good!) JSON reply cut off at `max_tokens: 2000` mid-name →
+`JSON.parse` failed → "vision model returned no JSON". Small
+selections worked because their replies fit. Fixes, all in
+`lib/vision-rename.ts`:
+
+- **Chunking** — ≤ `MAX_TARGETS_PER_VISION_CALL` (40) targets per call,
+  same image resent per chunk, results merged (131 targets = 4 calls).
+- **Salvage** — `salvagePairs` recovers complete `"id": "name"` pairs
+  from a truncated reply instead of discarding the batch.
+- **max_tokens 2000 → 3000** headroom per chunk.
+- **Retry once** per chunk on no-JSON / 429 / 5xx (auth errors fail
+  fast); fixed `content ?? reasoning_content` never falling through on
+  `content: ""` (empty string is not nullish — reasoning-only replies
+  were unparseable).
+- **Logging** — every vision call appends a JSONL line to
+  `store/logs/vision-rename.jsonl`: model, source, host, chunk indices,
+  target counts, image bytes, HTTP status, reply excerpts (300 chars),
+  parsed count, duration. The API key is never logged.
+
+8 new vitest cases (chunk split sizes, reasoning-only replies, retry,
+no-retry-on-4xx, salvage, log content + key exclusion); 169 total.
+Reproduced the failure live (dry-run) on the 131-target frame before
+the fix, verified after: full 131-name dry-run succeeds.
+
 ---
 
 ## Execution protocol (unchanged, binding)
