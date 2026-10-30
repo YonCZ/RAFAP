@@ -46,6 +46,7 @@ import {
 } from "./lib/stitch.js";
 import { searchNodes } from "./lib/search.js";
 import { buildOutline } from "./lib/outline.js";
+import { buildFlexLayout } from "./lib/flex-layout.js";
 import {
   collectRenameTargets,
   computeRenderScale,
@@ -1288,6 +1289,18 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "get_flex_layout",
+      description:
+        "CSS flexbox translation of the design's auto-layout — the layout INTENT, not bounding boxes. Per node: display/flex-direction/gap/padding/justify-content/align-items declarations, plus each child's sizing semantics (fixed → px, hug → fit-content, fill → flex-grow on the main axis / align-self:stretch on the cross axis, layoutGrow → flex-grow). Build layout CSS from this so it inherits the design's intent — pixel dimensions describe the result, not the rule. Scope: frameIds or all stored frames of the file (defaults to the most recently pulled file).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids — defaults to all stored frames of the file" },
+        },
+      },
+    },
+    {
       name: "describe_frames",
       description:
         "What the design actually LOOKS like: renders the frames and asks a vision model to describe the visual structure — layout regions and their roles, visual hierarchy, grouping, alignment, spacing — as markdown that references layer ids (joins with get_outline). Use when building or reproducing a design, or when the numbers alone do not explain the layout. Scope defaults to the current Figma selection; pass frameIds to target stored frames. Vision endpoint from VISION_BASE_URL/VISION_MODEL/VISION_API_KEY env vars or the user's OpenCode provider config.",
@@ -1616,6 +1629,29 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       const outline = buildOutline(frames, { maxNodes });
       return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${outline}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+    }
+  }
+  if (request.params.name === "get_flex_layout") {
+    // Round 15 — paste-ready flexbox translation of the auto-layout.
+    // The anti-bounding-box view: layout intent (hug/fill/fixed, gaps,
+    // padding, alignment) as CSS, so building from intent is easier
+    // than styling around pixel dimensions.
+    const args = (request.params.arguments as any) ?? {};
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
+    const maxNodes = typeof args.maxNodes === "number" ? args.maxNodes : undefined;
+    try {
+      const frames = frameIds.length ? await resolveFramesForIds(key, frameIds) : listFramesForFile(key);
+      if (!frames.length) {
+        return {
+          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+          isError: true,
+        };
+      }
+      const digest = buildFlexLayout(frames, { maxNodes });
+      return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${digest}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }

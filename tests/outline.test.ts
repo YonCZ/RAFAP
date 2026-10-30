@@ -126,3 +126,65 @@ describe("buildOutline", () => {
     expect(out.split("\n\n")).toHaveLength(2);
   });
 });
+
+describe("outline auto-layout intent tokens (Round 15)", () => {
+  it("shows hug/fill sizing and non-default alignment", () => {
+    const doc = {
+      id: "20:1",
+      name: "Intent",
+      type: "FRAME",
+      children: [
+        {
+          id: "20:2",
+          name: "Fill Row",
+          type: "FRAME",
+          layoutMode: "HORIZONTAL",
+          itemSpacing: 12,
+          layoutSizingHorizontal: "FILL",
+          layoutSizingVertical: "HUG",
+          primaryAxisAlignItems: "CENTER",
+          counterAxisAlignItems: "BASELINE",
+          absoluteBoundingBox: { x: 0, y: 0, width: 300, height: 50 },
+          children: [],
+        },
+        {
+          id: "20:3",
+          name: "Plain",
+          type: "FRAME",
+          layoutMode: "VERTICAL",
+          absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+          children: [],
+        },
+      ],
+    };
+    const out = buildOutline([{ id: "20:1", name: "Intent", document: doc }]);
+    const fillRow = out.split("\n").find((l) => l.includes("20:2"))!;
+    expect(fillRow).toContain("auto:H gap 12");
+    expect(fillRow).toContain("size V:hug H:fill");
+    expect(fillRow).toContain("align main:center cross:baseline");
+    const plain = out.split("\n").find((l) => l.includes("20:3"))!;
+    expect(plain).toBe('"Plain" · 20:3 · FRAME · 100x100 · auto:V'); // FIXED/MIN defaults stay implicit
+  });
+
+  it("resolves legacy sizing fields via layoutMode", () => {
+    const doc = {
+      id: "30:1",
+      name: "Legacy",
+      type: "FRAME",
+      children: [
+        {
+          id: "30:2",
+          name: "Old",
+          type: "FRAME",
+          layoutMode: "VERTICAL",
+          primaryAxisSizingMode: "FIXED",
+          counterAxisSizingMode: "FILL",
+          absoluteBoundingBox: { x: 0, y: 0, width: 100, height: 100 },
+          children: [],
+        },
+      ],
+    };
+    const out = buildOutline([{ id: "30:1", name: "Legacy", document: doc }]);
+    expect(out).toContain("size V:fixed H:fill");
+  });
+});

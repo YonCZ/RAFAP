@@ -1058,6 +1058,38 @@ correctly, no invented scaling.
 
 ---
 
+## Round 15 — layout intent as flexbox: `get_flex_layout`
+
+Second agent field report, in the agent's own words: "pixels are the
+path of least resistance, so I grabbed bounding boxes and styled
+around them." The tree carried the layout intent all along (auto-
+layout hug/fill/fixed, gaps, padding, alignment) — the agent skipped
+it because translating it was more work than reading pixels.
+
+- **`get_flex_layout`** — paste-ready CSS per auto-layout node
+  (display/direction/gap/padding/justify/align/wrap) plus each child's
+  sizing semantics (fixed → px, hug → fit-content, fill → flex:1 on
+  the parent's main axis / align-self:stretch on the cross axis,
+  layoutGrow → flex-grow). New `lib/flex-layout.ts`. Both sizing
+  schema generations supported (modern layoutSizing* and legacy
+  primary/counterAxisSizingMode — legacy maps via the node's own
+  layoutMode, CSS phrases via the parent's direction).
+- **Outline gains intent tokens** — `size V:hug H:fill` and
+  `align main:center cross:baseline` on the auto-layout line, only
+  when they differ from FIXED/MIN defaults, so intent is visible at
+  first read.
+- **Skill: hard rule** — "never derive layout from bounding-box
+  pixels; build from `get_flex_layout`" + workflow step 5. The rule
+  is enforceable because the tool makes obedience cheaper than
+  cheating: the translation is handed over, not demanded.
+- Non-auto frames say so ("no auto-layout — absolutely positioned
+  children"), which is itself information.
+
+10 new vitest cases (187 total). Live-verified on Board Screen
+101:1543.
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

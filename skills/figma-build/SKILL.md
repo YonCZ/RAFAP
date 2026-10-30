@@ -29,12 +29,16 @@ frame is empty — depth-pruned children look exactly like emptiness.
    frames you are about to build before writing code: it prevents
    plausible-sounding but wrong layout theories (e.g. inventing responsive
    scaling that is not in the design). Numbers alone are not seeing.
-5. **Only then, targeted detail** — `figma.get_nodes` with explicit ids (small
+5. **Layout intent — `figma.get_flex_layout`.** The design's auto-layout
+   (hug/fill/fixed, gaps, padding, alignment) is its layout INTENT and maps
+   1:1 to flexbox. This tool returns the translation. Do this BEFORE writing
+   any layout CSS.
+6. **Only then, targeted detail** — `figma.get_nodes` with explicit ids (small
    `depth` is fine now, because you already know the structure) for exact
    fills, radii, strokes; `figma.get_metadata` for components and styles;
    `figma.search_nodes` to find nodes by text when hunting something specific.
-6. **Build.** Map frames to components/routes using the understanding from
-   steps 2–4, not assumptions.
+7. **Build.** Map frames to components/routes using the understanding from
+   steps 2–5, not assumptions.
 
 ## Hard rules
 
@@ -53,6 +57,13 @@ frame is empty — depth-pruned children look exactly like emptiness.
 - Do not invent behavior that is not drawn (responsive scaling, animations,
   states). If the description and outline leave a real ambiguity, ask the
   user — do not guess silently.
+- **Never derive layout from bounding-box pixels.** Pixel dimensions are
+  the path of least resistance — that is exactly why they are wrong: they
+  describe the *result*, not the *intent*. The tree carries auto-layout
+  (hug/fill/fixed, gap, padding, alignment) which maps 1:1 to flexbox;
+  `figma.get_flex_layout` returns that translation (fixed → px,
+  hug → fit-content, fill → flex-grow / align-self:stretch). Build layout
+  from it; use pixels only to verify what you built, never to structure it.
 - If a frame's purpose is still ambiguous after the outline (no text, generic
   name), ask the user — do not guess silently. If the design is full of lazy
   default names ("Frame 336"), `figma.suggest_frame_names` can fix the naming
@@ -65,6 +76,7 @@ frame is empty — depth-pruned children look exactly like emptiness.
 | --- | --- |
 | Whole-design understanding | `figma.get_outline` (first, always) |
 | What the design visually looks like | `figma.describe_frames` (before building) |
+| Layout intent as flexbox | `figma.get_flex_layout` (before layout CSS) |
 | Pages + top-level frames | `figma.request_from_figma {type:'page-index'}` |
 | Exact styling of known ids | `figma.get_nodes {ids, depth}` |
 | Components / paint & text styles | `figma.get_metadata` |

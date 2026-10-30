@@ -33,6 +33,12 @@ interface WalkNode {
   paddingRight?: number;
   paddingBottom?: number;
   paddingLeft?: number;
+  layoutSizingHorizontal?: string;
+  layoutSizingVertical?: string;
+  primaryAxisSizingMode?: string;
+  counterAxisSizingMode?: string;
+  primaryAxisAlignItems?: string;
+  counterAxisAlignItems?: string;
   absoluteBoundingBox?: { x: number; y: number; width: number; height: number };
   visible?: boolean;
 }
@@ -49,12 +55,16 @@ function size(n: WalkNode): string {
   return `${Math.round(b.width)}x${Math.round(b.height)}`;
 }
 
-/** Auto-layout one-liner: `auto:H gap 12 pad T24 R8` — non-zero paddings
- *  only, omitted entirely for absolutely-positioned nodes. */
+/** Auto-layout one-liner: `auto:H gap 12 pad T24 R8 size V:fixed H:fill
+ *  align main:center cross:baseline` — non-zero paddings only; sizing and
+ *  alignment shown when they differ from the plain FIXED/MIN defaults
+ *  (hug/fill and centered/space-between are layout intent — see
+ *  lib/flex-layout.ts for the full CSS translation). Omitted entirely
+ *  for absolutely-positioned nodes. */
 function layoutSummary(n: WalkNode): string {
   const parts: string[] = [];
-  if (n.layoutMode === "HORIZONTAL") parts.push("auto:H");
-  else if (n.layoutMode === "VERTICAL") parts.push("auto:V");
+  const vertical = n.layoutMode === "VERTICAL";
+  if (n.layoutMode === "HORIZONTAL" || vertical) parts.push(vertical ? "auto:V" : "auto:H");
   else return "";
   if (typeof n.itemSpacing === "number" && n.itemSpacing > 0) {
     parts.push(`gap ${Math.round(n.itemSpacing)}`);
@@ -65,6 +75,29 @@ function layoutSummary(n: WalkNode): string {
   if (n.paddingBottom) pad.push(`B${Math.round(n.paddingBottom)}`);
   if (n.paddingLeft) pad.push(`L${Math.round(n.paddingLeft)}`);
   if (pad.length) parts.push(`pad ${pad.join(" ")}`);
+  // sizing semantics (both schema generations; FIXED default stays implicit)
+  const hIsPrimary = n.layoutMode === "HORIZONTAL";
+  const sizing = (axis: "horizontal" | "vertical"): string => {
+    const modern = axis === "horizontal" ? n.layoutSizingHorizontal : n.layoutSizingVertical;
+    if (typeof modern === "string" && modern) return modern;
+    const legacy =
+      axis === "horizontal"
+        ? hIsPrimary
+          ? n.primaryAxisSizingMode
+          : n.counterAxisSizingMode
+        : hIsPrimary
+          ? n.counterAxisSizingMode
+          : n.primaryAxisSizingMode;
+    return typeof legacy === "string" && legacy ? legacy : "FIXED";
+  };
+  const sV = sizing("vertical").toLowerCase();
+  const sH = sizing("horizontal").toLowerCase();
+  if (sV !== "fixed" || sH !== "fixed") parts.push(`size V:${sV} H:${sH}`);
+  const main = String(n.primaryAxisAlignItems ?? "");
+  const cross = String(n.counterAxisAlignItems ?? "");
+  if (main && main !== "MIN" || cross && cross !== "MIN") {
+    parts.push(`align main:${main.toLowerCase() || "min"} cross:${cross.toLowerCase() || "min"}`);
+  }
   return parts.join(" ");
 }
 

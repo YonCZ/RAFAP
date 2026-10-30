@@ -118,6 +118,7 @@ MCP client and the design is directly tool-accessible, no HTTP needed:
 | `get_selection` | selection command | The differentiator: "grab what I selected" |
 | `search_nodes` | — | Name/text/type search over the stored design — REST has no equivalent |
 | `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning. The *understanding* view — `get_file` of the same file is ~17× larger |
+| `get_flex_layout` | — | Paste-ready CSS flexbox translation of the auto-layout — the layout **intent** (fixed → px, hug → fit-content, fill → flex-grow/align-self:stretch, gaps, padding, alignment). Build layout from this, not from bounding boxes |
 | `suggest_frame_names` | — | Dry-run AI renaming of lazy frame names (`Frame 336` → `Top Nav`): renders the selection, sends PNG + layer facts to a vision LLM, returns proposals |
 | `apply_frame_names` | write | Applies `[{id, name}]` renames in Figma (one undo step) and patches the stored design so `get_outline` reflects them immediately |
 | `describe_frames` | — | The agent's eyes: renders the frames, asks a vision LLM to describe the visual structure (regions, hierarchy, grouping, spacing) as markdown with layer-id references that join `get_outline`. Use before building/reproducing a design |
