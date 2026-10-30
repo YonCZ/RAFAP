@@ -21,9 +21,7 @@ import {
   MIXED,
   buildTextOverrides,
   buildTypeStyle,
-  detectOverrideFields,
   flatMainKey,
-  mainRelativeId,
   mapColor,
   mapConstraints,
   mapEffects,
@@ -34,9 +32,8 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.10.0";
+const PLUGIN_VERSION = "4.0.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
-const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
 figma.showUI(__html__, { width: 220, height: 52 });
 
@@ -251,226 +248,6 @@ figma.ui.onmessage = async (msg: any) => {
       } else if (commandType === "probe-fonts") {
         // Round 7 (C2) — runtime font-metrics probing for unseen families.
         payload = await probeFonts(params?.fonts);
-      } else if (commandType === "probe") {
-        // Round 1 dev tool — raw node facts for corpus-rule fitting
-        // (vectorNetwork regions, constraints, style ids, dimensions), or a
-        // full instance-vs-main subtree dump for override-correspondence
-        // analysis when `instanceId` is given.
-        if (params.instanceId) {
-          const inst: any = await figma.getNodeByIdAsync(params.instanceId);
-          if (!inst || inst.type !== "INSTANCE") {
-            throw new Error(`not an instance: ${params.instanceId}`);
-          }
-          const main: any = await inst.getMainComponentAsync();
-          const dump = (root: any): any[] => {
-            const out: any[] = [];
-            const stack: any[] = [root];
-            while (stack.length) {
-              const cur = stack.pop()!;
-              out.push({
-                id: cur.id,
-                type: cur.type,
-                name: cur.name,
-                width: cur.width,
-                height: cur.height,
-                fillStyleId: cur.fillStyleId ?? null,
-                strokeStyleId: cur.strokeStyleId ?? null,
-                textStyleId: cur.textStyleId ?? null,
-                visible: cur.visible,
-                characters: cur.characters ?? undefined,
-              });
-              const kc = cur.children ?? [];
-              for (let i = kc.length - 1; i >= 0; i--) stack.push(kc[i]);
-            }
-            return out;
-          };
-          payload = {
-            instance: {
-              id: inst.id,
-              subtree: dump(inst),
-            },
-            main: main
-              ? { id: main.id, name: main.name, remote: !!main.remote, subtree: dump(main) }
-              : null,
-          };
-        } else if (params.instances && Array.isArray(params.instances)) {
-          // Round 5 D4/#11: instance-vs-main subtree accessibility — which
-          // children are visible, with which ids, and whether main-side
-          // (library) child ids resolve in this file's id space.
-          const out: any[] = [];
-          for (const iid of params.instances as string[]) {
-            try {
-              const inst: any = await figma.getNodeByIdAsync(iid);
-              if (!inst) {
-                out.push({ id: iid, error: "not found" });
-                continue;
-              }
-              const main: any = await inst.getMainComponentAsync();
-              const kids = Array.isArray(inst.children) ? inst.children.map((c: any) => c.id) : null;
-              const mainKids = main
-                ? Array.isArray(main.children)
-                  ? main.children.map((c: any) => c.id)
-                  : null
-                : null;
-              // can a main-side (library) child id resolve here?
-              let resolvedMainChild: string | null = null;
-              if (mainKids && mainKids.length && typeof mainKids[0] === "string") {
-                try {
-                  const n = await figma.getNodeByIdAsync(mainKids[0]);
-                  resolvedMainChild = n ? n.id : null;
-                } catch (e) {
-                  resolvedMainChild = `error: ${(e as Error).message}`;
-                }
-              }
-              out.push({
-                id: iid,
-                type: inst.type,
-                childIds: kids,
-                mainId: main?.id ?? null,
-                mainRemote: main?.remote ?? null,
-                mainChildIds: mainKids,
-                mainChildResolvesHere: resolvedMainChild,
-              });
-            } catch (e) {
-              out.push({ id: iid, error: (e as Error).message });
-            }
-          }
-          payload = { instances: out };
-        } else if (Array.isArray(params.ids) && params.ids.length > 0) {
-          const probes: any[] = [];
-          for (const id of (params.ids ?? []) as string[]) {
-            try {
-              const node: any = await figma.getNodeByIdAsync(id);
-              if (!node) {
-                probes.push({ id, error: "not found" });
-                continue;
-              }
-              const rec: any = {
-                id,
-                type: node.type,
-                name: node.name,
-                width: node.width,
-                height: node.height,
-                constraints: typeof node.constraints === "symbol" ? "MIXED" : node.constraints ?? null,
-                fillStyleId: node.fillStyleId ?? null,
-                textStyleId: node.textStyleId ?? null,
-                characters: node.characters ?? null,
-                // raw export settings — Round 3 E-exportSettings: two nodes
-                // (175:1274, 180:1137) report [{PNG}] to the plugin while
-                // REST serializes none; capture raw shape + counterpart controls
-                rawExportSettings: Array.isArray(node.exportSettings)
-                  ? (node.exportSettings as any[]).map((es) => ({
-                      format: es.format,
-                      constraint: es.constraint ?? null,
-                      suffix: es.suffix ?? null,
-                    }))
-                  : null,
-              };
-              // Round 5 D4: raw prototype-transition facts — legacy reads +
-              // reactions as the plugin really reports them (transition:
-              // null in interactions vs REST's transitionDuration 300).
-              try {
-                rec.transitionReads = {
-                  duration: node.transitionDuration ?? null,
-                  easing: node.transitionEasing ?? null,
-                  nodeID: node.transitionNodeID ?? null,
-                };
-                rec.reactionsRaw = JSON.parse(JSON.stringify(node.reactions ?? null));
-              } catch (e) {
-                rec.transitionError = (e as Error).message;
-              }
-              // Round 5 (#11 residue): MIXED style ids on rich text — the
-              // per-segment bindings are the only view of what REST reports
-              // node-level for these nodes.
-              // Round 5 F2: pin-to-viewport reads — typings expose no
-              // scrollBehavior; check whether the runtime does anyway.
-              try {
-                const pin: any = {};
-                try { pin.scrollBehavior = (node as any).scrollBehavior ?? null; } catch (e) { pin.scrollBehavior = `error: ${(e as Error).message}`; }
-                try { pin.isFixed = (node as any).isFixed ?? null; } catch (e) { pin.isFixed = `error: ${(e as Error).message}`; }
-                const names = new Set<string>();
-                let proto: any = Object.getPrototypeOf(node);
-                let guard = 0;
-                while (proto && guard++ < 20) {
-                  for (const nm of Object.getOwnPropertyNames(proto)) names.add(nm);
-                  proto = Object.getPrototypeOf(proto);
-                }
-                pin.protoScrollish = [...names].filter((nm) => /scroll|fixed|sticky/i.test(nm));
-                rec.pinReads = pin;
-              } catch {
-                /* pin probe unavailable */
-              }
-              if (node.type === "TEXT") {
-                try {
-                  const segs = (node as any).getStyledTextSegments(["fillStyleId", "textStyleId", "hyperlink"]);
-                  rec.textSegments = segs.map((s: any) => ({
-                    fillStyleId: s.fillStyleId ?? null,
-                    textStyleId: s.textStyleId ?? null,
-                    hyperlink: s.hyperlink ?? null,
-                    characters: String(s.characters ?? "").slice(0, 24),
-                  }));
-                } catch (e) {
-                  rec.textSegments = `error: ${(e as Error).message}`;
-                }
-              }
-              if (node.type === "VECTOR") {
-                try {
-                  const vn = node.vectorNetwork;
-                  rec.vectorRegions = vn?.regions?.length ?? 0;
-                  rec.vectorRegionFillCounts = (vn?.regions ?? []).map(
-                    (r: any) => r?.fills?.length ?? 0,
-                  );
-                  rec.vectorSegments = vn?.segments?.length ?? 0;
-                  rec.vectorVertices = vn?.vertices?.length ?? 0;
-                } catch {
-                  rec.vectorRegions = "unavailable";
-                }
-              }
-              probes.push(rec);
-            } catch (e) {
-              probes.push({ id, error: (e as Error).message });
-            }
-          }
-          payload = { probes };
-        } else if (params.styles === true) {
-          // Round 4 diagnostics: raw local-style enumeration, sync vs async
-          // getters side by side — settles how style ids really look (two
-          // files reported a single style with an empty id marker).
-          const dump: Record<string, any> = {};
-          const getterPairs: [string, string, string][] = [
-            ["paint", "getLocalPaintStyles", "getLocalPaintStylesAsync"],
-            ["text", "getLocalTextStyles", "getLocalTextStylesAsync"],
-            ["effect", "getLocalEffectStyles", "getLocalEffectStylesAsync"],
-            ["grid", "getLocalGridStyles", "getLocalGridStylesAsync"],
-          ];
-          const brief = (s: any) => ({
-            id: s?.id ?? null,
-            key: s?.key ?? null,
-            name: s?.name ?? null,
-            remote: s?.remote === true,
-          });
-          for (const [label, syncName, asyncName] of getterPairs) {
-            const entry: Record<string, any> = {};
-            try {
-              const sync = (figma as any)[syncName]?.();
-              entry.sync = Array.isArray(sync)
-                ? { count: sync.length, styles: sync.map(brief) }
-                : String(sync);
-            } catch (e) {
-              entry.syncError = (e as Error).message;
-            }
-            try {
-              const async = await (figma as any)[asyncName]?.();
-              entry.async = Array.isArray(async)
-                ? { count: async.length, styles: async.map(brief) }
-                : String(async);
-            } catch (e) {
-              entry.asyncError = (e as Error).message;
-            }
-            dump[label] = entry;
-          }
-          payload = { fileKey: await effectiveFileKey(), styles: dump };
-        }
       } else {
         throw new Error(`unknown command type: ${commandType}`);
       }
@@ -599,68 +376,6 @@ function lastSegmentStyleId(node: any, key: string): string | undefined {
 }
 
 /**
- * The resize ratio of a node's NEAREST instance ancestor (doc dims ÷ that
- * instance's main dims). This single ratio already composes every outer
- * scale — a nested instance's doc/main ratio includes its parent's resize
- * — so descendant size diffs explained by it are inherited scaling, not
- * stored overrides (Round 1, measured).
- */
-function inheritedScale(node: any, ctx: ExtractContext): { x: number; y: number } | undefined {
-  let p = node.parent;
-  while (p) {
-    if (p.type === "INSTANCE") {
-      const main = ctx.instanceMains.get(p.id);
-      if (main && main.width > 0 && main.height > 0) {
-        return { x: p.width / main.width, y: p.height / main.height };
-      }
-      return undefined;
-    }
-    p = p.parent;
-  }
-  return undefined;
-}
-
-/**
- * Emit every INSTANCE's `overrides` array (Round 1 — B1). REST emits
- * `overrides` on every instance (`[]` when nothing differs); entries are
- * `{id, overriddenFields}`, self first, then descendants in document order
- * (measured). Inherited overrides (a nested instance's own array) are NOT
- * included — each instance reports only its direct edits.
- */
-function attachInstanceOverrides(
-  objByNode: Map<BaseNode, Record<string, unknown>>,
-  ctx: ExtractContext,
-): void {
-  for (const [node, obj] of objByNode) {
-    if (node.type !== "INSTANCE") continue;
-    const overrides: { id: string; overriddenFields: string[] }[] = [];
-    const main = ctx.instanceMains.get(node.id);
-    if (main) {
-      const index = ctx.mainIndexes.get(main.id)!;
-      const selfFields = detectOverrideFields(node as any, main as any, inheritedScale(node, ctx));
-      if (selfFields.length) overrides.push({ id: node.id, overriddenFields: selfFields });
-
-      // descendants in document (pre-)order — iterative, depth-safe
-      const stack: any[] = [...((node as any).children ?? [])].reverse();
-      while (stack.length) {
-        const kid = stack.pop()!;
-        const rel = mainRelativeId(node.id, kid.id);
-        if (rel !== null) {
-          const mc = index.get(flatMainKey(rel)) ?? index.get(rel);
-          if (mc) {
-            const fields = detectOverrideFields(kid, mc, inheritedScale(kid, ctx));
-            if (fields.length) overrides.push({ id: kid.id, overriddenFields: fields });
-          }
-        }
-        const kc = kid.children ?? [];
-        for (let i = kc.length - 1; i >= 0; i--) stack.push(kc[i]);
-      }
-    }
-    obj.overrides = overrides;
-  }
-}
-
-/**
  * Real file keys require `enablePrivatePluginApi` (private org plugins
  * only — see the typings on figma.fileKey), which we deliberately don't
  * require. Instead we derive a stable, file-unique local key from the
@@ -725,12 +440,7 @@ interface ExtractionResult {
   styles: Record<string, unknown>;
 }
 
-// Timing accumulator — reset per extraction, reported under _figmaAgent
-// (dev diagnostics for slow extractions; stripped by the normalizer).
-const TIMINGS = { nodes: 0, serializeMs: 0, segmentsMs: 0, getStyleMs: 0, styleCalls: 0 };
-
 async function extractFramePayload(node: SceneNode): Promise<Record<string, unknown>> {
-  const t0 = Date.now();
   const { document, components, componentSets, styles } = await extractTree(node);
   return {
     id: node.id,
@@ -745,7 +455,6 @@ async function extractFramePayload(node: SceneNode): Promise<Record<string, unkn
       source: "plugin",
       extractedAt: new Date().toISOString(),
       pluginVersion: PLUGIN_VERSION,
-      timings: { ...TIMINGS, totalMs: Date.now() - t0 },
     },
   };
 }
@@ -804,11 +513,6 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
   const objByNode = new Map<BaseNode, Record<string, unknown>>();
   const stack: SceneNode[] = [root];
   let count = 0;
-  TIMINGS.nodes = 0;
-  TIMINGS.serializeMs = 0;
-  TIMINGS.segmentsMs = 0;
-  TIMINGS.getStyleMs = 0;
-  TIMINGS.styleCalls = 0;
 
   while (stack.length) {
     const node = stack.pop()!;
@@ -817,10 +521,7 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
     }
     let obj: Record<string, unknown>;
     try {
-      const _t0 = Date.now();
       obj = await serializeNode(node, ctx);
-      TIMINGS.serializeMs += Date.now() - _t0;
-      TIMINGS.nodes++;
     } catch (e) {
       // Resilience: one bad node must never kill the whole frame. Emit the
       // invariant core plus a visible marker under _figmaAgent (Rule B5).
@@ -850,10 +551,6 @@ async function extractTree(root: SceneNode): Promise<ExtractionResult> {
     }
   }
 
-  // Round 1 — instance override tables (needs every instance's main resolved
-  // first, so it runs after the whole tree is serialized).
-  attachInstanceOverrides(objByNode, ctx);
-
   const document = objByNode.get(root);
   if (!document) throw new Error("extraction failed: root node missing");
   return { document, components, componentSets, styles };
@@ -870,25 +567,6 @@ const TYPE_MAP: Record<string, string> = {
 
 function restNodeType(pluginType: string): string {
   return TYPE_MAP[pluginType] ?? pluginType; // B4: unknown types pass through
-}
-
-/**
- * The first NODE-type action's destination across a node's reactions —
- * REST's legacy `transitionNodeID`. Cross-file destinations included: the
- * plugin reports the destination's own id (e.g. a library-side frame)
- * even though it cannot resolve the node itself.
- */
-function firstNodeDestinationId(reactions: unknown): string | undefined {
-  if (!Array.isArray(reactions)) return undefined;
-  for (const r of reactions as any[]) {
-    const actions = Array.isArray(r?.actions) ? r.actions : r?.action ? [r.action] : [];
-    for (const a of actions as any[]) {
-      if (a?.type === "NODE" && typeof a?.destinationId === "string" && a.destinationId) {
-        return a.destinationId;
-      }
-    }
-  }
-  return undefined;
 }
 
 /**
@@ -913,39 +591,11 @@ function parentHasAutoLayout(node: BaseNode): boolean {
   return mode && mode !== "NONE";
 }
 
-/** node.absoluteRenderBounds — REST emits this at the top level of every node. */
-function absoluteRenderBox(node: SceneNode): Record<string, number> | null {
-  const rb = (node as any).absoluteRenderBounds;
-  if (!rb) return null;
-  return { x: rb.x, y: rb.y, width: rb.width, height: rb.height };
-}
-
-/** Paints for REST's always-present fills/strokes/background arrays. */
+/** Paints for the always-present fills/strokes arrays. */
 function paintArray(paints: unknown): Record<string, unknown>[] | string {
   if (typeof paints === "symbol") return MIXED;
   if (Array.isArray(paints)) return mapPaints(paints as Paint[]);
   return [];
-}
-
-/** Frame backgroundColor — first VISIBLE solid fill's color, transparent otherwise. */
-function frameBackgroundColor(fills: unknown): { r: number; g: number; b: number; a: number } {
-  if (Array.isArray(fills)) {
-    for (const p of fills as {
-      type?: string;
-      visible?: boolean;
-      opacity?: number;
-      color?: { r: number; g: number; b: number; a?: number };
-    }[]) {
-      if (p && p.type === "SOLID" && p.visible !== false && p.color) {
-        // REST folds the paint's opacity into backgroundColor.a (while
-        // keeping it separate on fills); plugin solid colors carry no
-        // alpha of their own — measured.
-        const a = typeof p.opacity === "number" ? p.opacity : 1;
-        return { r: p.color.r, g: p.color.g, b: p.color.b, a };
-      }
-    }
-  }
-  return { r: 0, g: 0, b: 0, a: 0 };
 }
 
 async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Record<string, unknown>> {
@@ -962,12 +612,11 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     ...(node.visible === false ? { visible: false } : {}),
     absoluteBoundingBox: absoluteBox(node),
   });
-  // REST emits absoluteRenderBounds on every node — null when not rendered
-  out.absoluteRenderBounds = absoluteRenderBox(node);
-
-  // B3 — mixed sentinels; B2 — omit absent like REST
+  // Round 16 — contract-only extraction (option A): structure, layout
+  // intent, text, styling, components. The parity-grade extras
+  // (renderBounds, blend modes, interactions, prototyping, vector
+  // geometry, export settings, …) are gone — see docs/mined-data.md.
   if (typeof n.opacity === "number" && n.opacity !== 1) out.opacity = n.opacity;
-  if (n.blendMode && n.blendMode !== "NORMAL") out.blendMode = n.blendMode;
   // constraints — REST emits them on every scene node; the plugin omits
   // the property on GROUPs and auto-layout children. Defaults measured:
   // GROUP/regular → LEFT/TOP, auto-layout child → SCALE/SCALE.
@@ -984,46 +633,15 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     out.constraints = parentHasAutoLayout(node)
       ? { horizontal: "SCALE", vertical: "SCALE" }
       : { horizontal: "LEFT", vertical: "TOP" };
-  if (node.locked === true) out.locked = true;
 
-  // fills / strokes / effects / interactions / scrollBehavior — REST
-  // emits these on EVERY node (empty array / "SCROLLS" when unset).
+  // fills / strokes / effects — the styling contract.
   out.fills = paintArray(n.fills);
   out.strokes = paintArray(n.strokes);
   out.effects = Array.isArray(n.effects) && n.effects.length ? mapEffects(n.effects) : [];
-  out.interactions = (Array.isArray(n.reactions) ? n.reactions : []).map((r: any) => ({
-    trigger: r?.trigger ?? null,
-    actions: (Array.isArray(r?.actions) ? r.actions : r?.action ? [r.action] : []).map((a: any) =>
-      a?.resetVideoPosition === false ? { ...a, resetVideoPosition: undefined } : a,
-    ),
-  }));
-  // The plugin has no API to read scrollBehavior — REST's default is
-  // SCROLLS; pinned (FIXED) frames are a documented deviation.
-  out.scrollBehavior = "SCROLLS";
 
-  // stroke geometry — also on every node. Per-side weights surface as
-  // individualStrokeWeights when the sides are non-uniform; REST then
-  // reports the constant 1 as the scalar strokeWeight (measured: 41/41
-  // non-uniform nodes carry strokeWeight 1 — a placeholder, not the max).
-  const sides = [n.strokeTopWeight, n.strokeRightWeight, n.strokeBottomWeight, n.strokeLeftWeight];
-  if (new Set(sides).size > 1) {
-    out.individualStrokeWeights = {
-      top: n.strokeTopWeight,
-      right: n.strokeRightWeight,
-      bottom: n.strokeBottomWeight,
-      left: n.strokeLeftWeight,
-    };
-    out.strokeWeight = 1;
-  } else {
-    out.strokeWeight = typeof n.strokeWeight === "number" ? n.strokeWeight : 1;
-  }
+  // stroke — scalar weight + alignment only.
+  out.strokeWeight = typeof n.strokeWeight === "number" ? n.strokeWeight : 1;
   out.strokeAlign = n.strokeAlign ?? "INSIDE";
-  if (typeof n.strokeCap === "string" && n.strokeCap !== "NONE") out.strokeCap = n.strokeCap;
-  if (typeof n.strokeJoin === "string" && n.strokeJoin !== "MITER") out.strokeJoin = n.strokeJoin;
-  if (Array.isArray(n.strokeDashes) && n.strokeDashes.length) out.strokeDashes = n.strokeDashes;
-  else if (Array.isArray(n.dashPattern) && n.dashPattern.length) out.strokeDashes = n.dashPattern;
-  // BOOLEAN_OPERATION is the one type REST leaves this off (measured).
-  if (node.type !== "BOOLEAN_OPERATION") out.complexStrokeProperties = { strokeType: "BASIC" };
 
   // corner radii — uniform cornerRadius OR rectangleCornerRadii [TL,TR,BR,BL]
   if (typeof n.topLeftRadius === "number") {
@@ -1036,22 +654,6 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     }
   } else if (typeof n.cornerRadius === "number" && n.cornerRadius !== 0) {
     out.cornerRadius = n.cornerRadius;
-  }
-  // cornerSmoothing rides along whenever radii are emitted (measured: REST
-  // never emits smoothing without a radius, even when smoothing is set).
-  // Vectors with smoothing but no radius get zeroed radii + smoothing 0.
-  const hasRadii = out.cornerRadius !== undefined || out.rectangleCornerRadii !== undefined;
-  if (hasRadii) {
-    out.cornerSmoothing = n.cornerSmoothing ?? 0;
-  } else if (
-    node.type === "VECTOR" &&
-    n.isMask === true &&
-    typeof n.cornerSmoothing === "number" &&
-    n.cornerSmoothing > 0 &&
-    !(typeof n.cornerRadius === "number" && n.cornerRadius !== 0)
-  ) {
-    out.rectangleCornerRadii = [0, 0, 0, 0];
-    out.cornerSmoothing = 0;
   }
 
   // auto-layout container properties — only when layoutMode is active.
@@ -1082,8 +684,7 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     );
   }
 
-  // frame-like nodes: background paints, derived backgroundColor, real
-  // clipsContent — GROUPs and COMPONENT_SETs carry these too (measured)
+  // frame-like nodes: clipsContent (overflow: hidden is styling)
   if (
     node.type === "FRAME" ||
     node.type === "COMPONENT" ||
@@ -1091,42 +692,7 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     node.type === "GROUP" ||
     node.type === "COMPONENT_SET"
   ) {
-    out.background = paintArray(n.backgrounds);
-    out.backgroundColor = frameBackgroundColor(n.fills);
     out.clipsContent = n.clipsContent === true;
-  }
-
-  // masks + boolean operation type + arc data
-  if (n.isMask === true) {
-    out.isMask = true;
-    out.maskType = n.maskType ?? "ALPHA";
-  }
-  if (typeof n.booleanOperation === "string") out.booleanOperation = n.booleanOperation;
-  if (n.arcData && typeof n.arcData.startingAngle === "number") {
-    out.arcData = {
-      startingAngle: n.arcData.startingAngle,
-      endingAngle: n.arcData.endingAngle,
-      innerRadius: n.arcData.innerRadius,
-    };
-  }
-  // exposed component properties bound to this node (mostly TEXT in components)
-  if (n.componentPropertyReferences && Object.keys(n.componentPropertyReferences as object).length) {
-    out.componentPropertyReferences = n.componentPropertyReferences;
-  }
-  // frame prototype transitions (older API surface, read defensively)
-  if (typeof n.transitionDuration === "number") out.transitionDuration = n.transitionDuration;
-  if (typeof n.transitionEasing === "string") out.transitionEasing = n.transitionEasing;
-  if (typeof n.transitionNodeID === "string") out.transitionNodeID = n.transitionNodeID;
-  // Round 5 (D4): REST derives the legacy triple from reactions — and the
-  // legacy reads above are always null in current Figma (probed: even a
-  // wired instance reports null from all three). The first NODE action's
-  // destinationId IS the destination node id, cross-file included (probed:
-  // '10:1098', the library-side frame REST emits). Duration/easing remain
-  // server-side — the bridge's rest-bootstrap transition table injects
-  // them at persist time (deviation #16).
-  if (out.transitionNodeID === undefined) {
-    const dest = firstNodeDestinationId(n.reactions);
-    if (dest) out.transitionNodeID = dest;
   }
 
   // how this node sits inside layouts — REST only emits these on children
@@ -1144,68 +710,9 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     if (out.layoutSizingVertical === undefined) delete out.layoutSizingVertical;
   }
 
-  // assorted REST node fields the plugin exposes directly
-  if (Array.isArray(n.layoutGrids) && n.layoutGrids.length) {
-    // REST grid objects carry no boundVariables — strip the plugin extra
-    out.layoutGrids = (n.layoutGrids as Record<string, unknown>[]).map((g) => {
-      const { boundVariables: _bv, ...grid } = g;
-      return grid;
-    });
-  }
-  if (Array.isArray(n.exportSettings) && n.exportSettings.length) {
-    // REST shape: {format, constraint (default SCALE 1 — even for SVG), suffix}
-    out.exportSettings = (n.exportSettings as any[]).map((es) => ({
-      format: es.format,
-      constraint: es.constraint ?? { type: "SCALE", value: 1 },
-      suffix: es.suffix ?? "",
-    }));
-  }
-  // aspect lock surfaces as preserveRatio + targetAspectRatio in REST, but
-  // only OUTSIDE auto-layout trees (inside them the layout drives sizing)
-  if (n.preserveRatio === true || (n.targetAspectRatio && typeof n.targetAspectRatio.x === "number")) {
-    if (!parentHasAutoLayout(node)) out.preserveRatio = true;
-  }
-  if (n.targetAspectRatio && typeof n.targetAspectRatio.x === "number") {
-    out.targetAspectRatio = { x: n.targetAspectRatio.x, y: n.targetAspectRatio.y };
-  }
-  if (n.boundVariables && Object.keys(n.boundVariables as object).length) {
-    out.boundVariables = n.boundVariables;
-  }
-
   // text nodes — characters + style + per-character overrides (agent.md §7.3.8)
   if (node.type === "TEXT") {
     Object.assign(out, serializeText(node as TextNode));
-    // Round 6 (#21) — register every range-bound style id in the file-level
-    // styles map (REST's map includes styles referenced only from rich-text
-    // ranges) and normalize entry values to the marker form, exactly like
-    // the node-level binding loop below.
-    const sot = out.styleOverrideTable as Record<string, Record<string, unknown>> | undefined;
-    if (sot) {
-      for (const entry of Object.values(sot)) {
-        for (const field of ["inheritFillStyleId", "inheritTextStyleId"] as const) {
-          const id = entry?.[field];
-          if (typeof id !== "string" || !id || styles[id]) continue;
-          try {
-            const _st0 = Date.now();
-            TIMINGS.styleCalls++;
-            const st = await figma.getStyleByIdAsync(id);
-            TIMINGS.getStyleMs += Date.now() - _st0;
-            if (!st) continue;
-            const nodeId = st.id.includes(",") ? st.id.slice(st.id.indexOf(",") + 1) : st.id;
-            styles[nodeId] = {
-              key: st.key,
-              name: st.name,
-              description: st.description ?? "",
-              remote: (st as any).remote === true,
-              styleType: restStyleType((st as any).type),
-            };
-            if (nodeId !== id) entry[field] = nodeId;
-          } catch {
-            /* style unresolvable — keep the raw id */
-          }
-        }
-      }
-    }
   }
 
   // components / instances
@@ -1283,10 +790,7 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
     for (const [field, id] of Object.entries(styleBindings as Record<string, string>)) {
       if (styles[id]) continue;
       try {
-        const _st0 = Date.now();
-        TIMINGS.styleCalls++;
         const st = await figma.getStyleByIdAsync(id);
-        TIMINGS.getStyleMs += Date.now() - _st0;
         if (st) {
           // plugin style ids look like "S:<hash>,<nodeId>" — for local
           // styles the suffix is the file-local node id REST emits. Remote
@@ -1312,18 +816,6 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
       const sb = styleBindings as Record<string, string>;
       if (sb.fill) sb.fills = sb.fill;
       if (sb.stroke) sb.strokes = sb.stroke;
-    }
-  }
-
-  // SVG markup — our extension (REST cannot do this), namespaced per B5
-  if (SVG_EXPORT_TYPES.has(node.type)) {
-    try {
-      const bytes = await node.exportAsync({ format: "SVG" });
-      // The sandbox has no TextDecoder — base64 carries the bytes; the
-      // bridge decodes with Buffer (never hand-rolled fromCharCode).
-      figmaAgentExt(out).svgBase64 = figma.base64Encode(bytes);
-    } catch {
-      /* export not allowed for this node — skip */
     }
   }
 
@@ -1399,7 +891,6 @@ function serializeText(t: TextNode): Record<string, unknown> {
 
   let segments: SegmentInput[] = [];
   try {
-    const _seg0 = Date.now();
     const raw = t.getStyledTextSegments([
       "fontName",
       "fontSize",
@@ -1411,13 +902,7 @@ function serializeText(t: TextNode): Record<string, unknown> {
       "textCase",
       "paragraphSpacing",
       "paragraphIndent",
-      // Round 6 (#21) — per-range bound style ids ARE exposed here (probed;
-      // the typings' claim "not exposed" was wrong). REST surfaces them as
-      // inheritFillStyleId/inheritTextStyleId on styleOverrideTable entries.
-      "fillStyleId",
-      "textStyleId",
     ]);
-    TIMINGS.segmentsMs += Date.now() - _seg0;
     segments = raw.map((s) => {
       const source: StyleSource = {
         fontFamily: s.fontName?.family,
@@ -1441,10 +926,6 @@ function serializeText(t: TextNode): Record<string, unknown> {
         start: s.start,
         end: s.end,
         style: buildTypeStyle(source),
-        // marker form ("S:<hash>,<nodeId>") — the bridge join renames to
-        // the library-side node id at persist time (deviation #10)
-        inheritFillStyleId: styleIdValue(s.fillStyleId) || undefined,
-        inheritTextStyleId: styleIdValue(s.textStyleId) || undefined,
       };
     });
   } catch {

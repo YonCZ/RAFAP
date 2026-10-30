@@ -1090,6 +1090,49 @@ it because translating it was more work than reading pixels.
 
 ---
 
+## Round 16 — the launchpad: contract-first, option A (speed)
+
+The conversation that reset the project. The contract, in the user's own
+words: *"I tell the agent: let's build the next step in our webapp, I
+made this frame, I selected it in Figma. I expect them to build the
+same structure from the fill/hug/fixed auto-layouts, then fill it with
+same color, same text, same effects."* Every round before this was a
+reaction to an agent failure; Round 16 defined the target first and
+then deleted everything that does not serve it.
+
+- **`prepare_build`** — one call, defaults to the current selection:
+  outline (structure + all text) + flexbox translation (layout intent)
+  in a single response. The agent ritual is now three steps:
+  prepare_build → targeted detail → build.
+- **MCP surface 15 → 9.** Removed: `describe_frames` (the multimodal
+  round — the agent's failure was method laziness, not blindness; the
+  vision describer solved a problem that did not exist), `get_file` /
+  `get_figma_frame` / `get_latest_figma_frame` /
+  `request_from_figma` (context burners / digest duplicates),
+  `suggest_frame_names` + `apply_frame_names` (renaming is the panel
+  button — `POST /api/rename/selected` — not an agent tool).
+- **Plugin extraction slimmed (option A)** — the REST byte-parity
+  mission retired in favor of pull speed and small payloads. The
+  plugin now extracts only the contract: structure, layout intent,
+  constraints, text + styles, fills/strokes/effects/radii, components
+  and style maps, clipsContent. Gone: svgBase64 (was never consumed by
+  anything), vector geometry, prototyping/interactions/transitions,
+  per-side stroke weights, dash patterns, corner smoothing, blend
+  modes, renderBounds, transforms, layoutGrids, exportSettings,
+  instance `overrides` tables, per-range bound style ids, the
+  `_figmaAgent` timings, and the parity `probe` command + its bridge
+  endpoint. Full inventory with verdicts: `docs/mined-data.md`.
+- **Skill rewritten** to the three-step contract; hard rules kept
+  (never layout from pixels, never "empty frame" from pruned pulls,
+  get_images is for assets not for looking).
+- Bridge 4.0.0, plugin 4.0.0. The HTTP REST endpoints still serve the
+  store — contract-shaped now, not parity-shaped.
+
+179 tests (describe suites deleted). The parity-era "definition of
+done" checklist below is retired with the mission it measured.
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.
@@ -1100,7 +1143,10 @@ it because translating it was more work than reading pixels.
 6. REST calls: never more than one per run; the corpus is cached — Rounds 0–6 required **zero** new `api.figma.com` calls; Round 7 budgets exactly one (R7.4's second-file corpus).
 7. Rounds are ordered; don't start a round before the previous one's acceptance criteria are met and recorded in the scorecard (I2).
 
-## Definition of done (project-level)
+## Definition of done (project-level) — RETIRED with Round 16
+
+The byte-parity mission ended in Round 16 (option A: speed over parity).
+Kept below for the historical record; live goals are in Round 16.
 
 - [ ] Scorecard shows ≤ 18 residual byte paths, all matched to deviations-doc entries
 - [ ] Semantic parity 100% (E2 layer)
