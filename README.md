@@ -68,6 +68,12 @@ To use it from your AI tooling, register it with OpenCode (see
   serving from the shared store and delegating live commands to the owner.
   Run only one if you can (`opencode service restart` cleans up OpenCode's
   spawns).
+- **Old bridge survives a service restart** — an OpenCode-spawned bridge can
+  be orphaned (reparented to launchd) and keep holding port 3002 with the
+  *old* code: new commands like `rename` then fail with "invalid command"
+  even after a restart. Find it with `lsof -ti :3002 -sTCP:LISTEN`, `kill`
+  it — a fresh follower takes the port within 30s and the plugin reconnects
+  on its own.
 - **"node X not found in this file"** — the plugin operates on the file
   that is *open* in Figma. Open the file the node belongs to.
 - After changing plugin code: `npm run publish`, then
@@ -105,6 +111,8 @@ MCP client and the design is directly tool-accessible, no HTTP needed:
 | `get_selection` | selection command | The differentiator: "grab what I selected" |
 | `search_nodes` | — | Name/text/type search over the stored design — REST has no equivalent |
 | `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning. The *understanding* view — `get_file` of the same file is ~17× larger |
+| `suggest_frame_names` | — | Dry-run AI renaming of lazy frame names (`Frame 336` → `Top Nav`): renders the selection, sends PNG + layer facts to a vision LLM, returns proposals |
+| `apply_frame_names` | write | Applies `[{id, name}]` renames in Figma (one undo step) and patches the stored design so `get_outline` reflects them immediately |
 | `request_from_figma` | command queue | Fresh pulls on demand (`page-index`, `frame`, `selection`, `export`) |
 
 The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
@@ -142,6 +150,31 @@ ln -s <path-to-repo>/skills/figma-build ~/.config/opencode/skills/figma-build
 
 Any agent that can call the `figma` MCP tools (OpenCode, Claude Code, …)
 benefits; the skill just encodes the workflow discipline.
+
+## Vision renaming (`suggest_frame_names` / `apply_frame_names`)
+
+Frame names are the cheapest context signal an agent gets from a design —
+"Frame 336" carries no intent. The renamer fixes lazy default names with a
+vision LLM: it renders the selection, sends the PNG plus each layer's
+type/size/text content, and returns proposals (dry-run). Review them, then
+apply — the whole batch is one Figma undo step, and the stored design is
+patched so `get_outline` reflects the new names instantly. Only default
+names (`Frame \d+`, `Group 5`, …) are ever touched; deliberately-named
+nodes are untouchable.
+
+The vision endpoint is any OpenAI-compatible chat-completions API:
+
+```sh
+export VISION_BASE_URL="https://api.example.com/v1"
+export VISION_MODEL="qwen-vl-…"      # any image-capable model
+export VISION_API_KEY="…"            # stays server-side, never logged
+```
+
+With no env vars set, the bridge falls back to the first provider in
+`~/.config/opencode/opencode.json` that has a `baseURL` + `apiKey`
+(preferring Qwen-family models). Tiny frames are auto-rendered at a higher
+scale — some vision endpoints reject images below ~512px.
+
 
 ## Font metrics (line heights)
 

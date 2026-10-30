@@ -1,6 +1,6 @@
 ---
 name: Figma Build
-description: Understand a Figma design completely before building it — use whenever implementing, reviewing, or answering questions about a design in Figma via the figma MCP tools
+description: Understand a Figma design completely before building it — use whenever the user asks to implement, code, review, or discuss a design in Figma (e.g. "build this", "code this frame", "I selected the frame in Figma — make it"), via the figma MCP tools
 ---
 
 # Figma Build — read the whole design first
@@ -42,7 +42,10 @@ frame is empty — depth-pruned children look exactly like emptiness.
   assets or giving them to the user, never for "looking" at the design. The
   outline IS your eyes.
 - If a frame's purpose is still ambiguous after the outline (no text, generic
-  name), ask the user — do not guess silently.
+  name), ask the user — do not guess silently. If the design is full of lazy
+  default names ("Frame 336"), `figma.suggest_frame_names` can fix the naming
+  at the source with a vision model (dry-run, then `figma.apply_frame_names`)
+  — better names make every later read richer.
 
 ## Quick reference
 
@@ -55,3 +58,4 @@ frame is empty — depth-pruned children look exactly like emptiness.
 | Find nodes by text/name/type | `figma.search_nodes` |
 | What the user has selected | `figma.get_selection` |
 | Export an asset | `figma.get_images {ids, format, scale}` |
+| Rename lazy "Frame 336" names | `figma.suggest_frame_names` → `figma.apply_frame_names` |

@@ -46,6 +46,12 @@ import {
 } from "./lib/stitch.js";
 import { searchNodes } from "./lib/search.js";
 import { buildOutline } from "./lib/outline.js";
+import {
+  collectRenameTargets,
+  resolveVisionConfig,
+  sanitizeName,
+  suggestNames,
+} from "./lib/vision-rename.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
@@ -268,6 +274,52 @@ function listFramesForFile(key: string, only?: string[]): StoredFrame[] {
     .filter((f) => !wanted || wanted.has(f.id));
 }
 
+/** Round 11 — after a plugin rename, patch the stored documents (node
+ *  names, frame record names, pages.json children) so get_outline /
+ *  get_file reflect the new names without a re-pull. Best-effort: ids not
+ *  in the store (never-pulled subtrees) are simply skipped. */
+function patchStoredNames(key: string, applied: Array<{ id: string; name: string }>): number {
+  const byId = new Map(applied.map((r) => [r.id, r.name]));
+  let patched = 0;
+  for (const f of listFramesForFile(key)) {
+    let dirty = false;
+    if (typeof f.id === "string" && byId.has(f.id)) {
+      f.name = byId.get(f.id)!;
+      dirty = true;
+    }
+    const walk = (n: unknown): void => {
+      if (n && typeof n === "object") {
+        const node = n as { id?: string; name?: string; children?: unknown[] };
+        if (typeof node.id === "string" && byId.has(node.id)) {
+          node.name = byId.get(node.id)!;
+          dirty = true;
+          patched++;
+        }
+        if (Array.isArray(node.children)) node.children.forEach(walk);
+      }
+    };
+    walk(f.document);
+    if (dirty) {
+      const file = path.join(framesDirFor(key), `${frameFileName(f.id)}.json`);
+      fs.writeFileSync(file, JSON.stringify(f, null, 2));
+    }
+  }
+  const pages = getPages(key);
+  if (pages) {
+    let dirty = false;
+    for (const p of pages.pages ?? []) {
+      for (const c of p.children ?? []) {
+        if (typeof c.id === "string" && byId.has(c.id)) {
+          c.name = byId.get(c.id)!;
+          dirty = true;
+        }
+      }
+    }
+    if (dirty) savePageIndex(pages as StoredPageIndex & Record<string, unknown>);
+  }
+  return patched;
+}
+
 interface FrameSummary {
   id: string;
   name: string;
@@ -324,7 +376,7 @@ function latestPageIndex(): StoredPageIndex | null {
 // Command queue — agent asks, the open plugin executes (long-polled).
 // ---------------------------------------------------------------------------
 
-type CommandType = "page-index" | "frame" | "selection" | "export" | "probe" | "probe-fonts";
+type CommandType = "page-index" | "frame" | "selection" | "export" | "probe" | "probe-fonts" | "rename";
 
 interface AgentCommand {
   id: string;
@@ -367,10 +419,11 @@ function sweepStale(): void {
 }
 
 function createCommand(type: string, params: any): AgentCommand | null {
-  const valid: CommandType[] = ["page-index", "frame", "selection", "export", "probe", "probe-fonts"];
+  const valid: CommandType[] = ["page-index", "frame", "selection", "export", "probe", "probe-fonts", "rename"];
   if (!valid.includes(type as CommandType)) return null;
   if (type === "frame" && !params?.id) return null;
   if (type === "export" && !Array.isArray(params?.ids)) return null;
+  if (type === "rename" && !Array.isArray(params?.renames)) return null;
   const id = `cmd_${Date.now()}_${++cmdCounter}`;
   // `type` is validated above, but TS can't narrow through .includes()
   const cmd: AgentCommand = {
@@ -411,6 +464,7 @@ function persistResult(cmd: AgentCommand, payload: any): void {
     return;
   }
   if (cmd.type === "export") return; // assets handled by the /v1/images caller
+  if (cmd.type === "rename") return; // store patching handled by apply_frame_names
   const frames = Array.isArray(payload) ? payload : payload?.id ? [payload] : [];
   for (const f of frames) if (f?.id) saveFrame(f);
 }
@@ -1202,6 +1256,31 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
+    {
+      name: "suggest_frame_names",
+      description:
+        "Dry-run AI renaming of lazy Figma frame names (Frame 336 → 'Top Nav'): renders the frames, sends the PNG plus each layer's type/size/text content to a vision LLM, and returns proposed names. Scope defaults to the current selection (plus its unnamed children); pass frameIds to target stored frames instead. Only default names like 'Frame 336'/'Group 5' are ever proposed — deliberately-named nodes are untouched. Nothing is written; review the suggestions, then apply with apply_frame_names. The vision endpoint comes from VISION_BASE_URL/VISION_MODEL/VISION_API_KEY env vars, or the user's OpenCode provider config.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids to rename inside (defaults to the current Figma selection)" },
+          fileKey: { type: "string", description: "File key (defaults to the selection's / most recently pulled file)" },
+        },
+      },
+    },
+    {
+      name: "apply_frame_names",
+      description:
+        "Apply frame renames in Figma: {renames: [{id, name}]} — pass the suggestions from suggest_frame_names. The whole batch executes as one Figma undo step (Cmd+Z). The stored design is patched to match, so get_outline/get_file immediately reflect the new names. Requires the plugin connected.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          renames: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } }, description: "Renamed nodes — [{id, name}]" },
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+        },
+        required: ["renames"],
+      },
+    },
   ],
 }));
 
@@ -1371,6 +1450,111 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
       const outline = buildOutline(frames, { maxNodes });
       return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${outline}` }] };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+    }
+  }
+  if (request.params.name === "suggest_frame_names") {
+    const args = (request.params.arguments as any) ?? {};
+    const cfg = resolveVisionConfig();
+    if (!cfg) {
+      return {
+        content: [{
+          type: "text",
+          text: "no vision endpoint configured — set VISION_BASE_URL + VISION_MODEL + VISION_API_KEY (any OpenAI-compatible endpoint), or configure a provider in ~/.config/opencode/opencode.json",
+        }],
+      };
+    }
+    try {
+      const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
+      let frames: StoredFrame[];
+      let key: string;
+      if (frameIds.length) {
+        key = String(args.fileKey ?? defaultFileKey() ?? "");
+        frames = await resolveFramesForIds(key, frameIds);
+      } else {
+        if (!pluginConnected() && httpPortOwned) {
+          return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma, or pass frameIds." }] };
+        }
+        const picked = await runCommand("selection", {});
+        frames = (Array.isArray(picked) ? picked : []) as StoredFrame[];
+        if (!frames.length) {
+          return { content: [{ type: "text", text: "Error: nothing is selected in Figma — select the frames to rename, or pass frameIds." }] };
+        }
+        for (const f of frames) {
+          if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
+        }
+        key = String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? "");
+      }
+
+      const suggestions: Array<Record<string, unknown>> = [];
+      let withNames = 0;
+      for (const frame of frames) {
+        const targets = collectRenameTargets(frame.document);
+        if (!targets.length) continue;
+        // Vision endpoints reject tiny images — render so min(dim) ≥ 512px.
+        const bb = (frame.document as any)?.absoluteBoundingBox;
+        const minDim = Math.min(Number(bb?.width) || 0, Number(bb?.height) || 0) || 512;
+        const scale = Math.max(1, Math.min(4, Math.ceil(512 / minDim)));
+        const images = await exportImagesForKey(key, [frame.id], "png", scale);
+        const asset = assetPath(key, frame.id, "png");
+        if (!images[frame.id] || !fs.existsSync(asset)) {
+          return { content: [{ type: "text", text: `Error: could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` }] };
+        }
+        const b64 = fs.readFileSync(asset).toString("base64");
+        const names = await suggestNames(cfg, b64, targets);
+        for (const t of targets) {
+          const suggestedName = names[t.id] ?? null;
+          if (suggestedName) withNames++;
+          suggestions.push({
+            id: t.id,
+            currentName: t.currentName,
+            suggestedName,
+            type: t.type,
+            size: `${t.width}x${t.height}`,
+            textInside: t.textInside,
+          });
+        }
+      }
+      if (!suggestions.length) {
+        return { content: [{ type: "text", text: "nothing to rename — every frame in scope already has a deliberate name (only default names like \"Frame 336\" are candidates)" }] };
+      }
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify(
+            { fileKey: key, model: cfg.model, source: cfg.source, dryRun: true, count: withNames, suggestions },
+            null,
+            2,
+          ),
+        }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+    }
+  }
+  if (request.params.name === "apply_frame_names") {
+    const args = (request.params.arguments as any) ?? {};
+    const renames = (Array.isArray(args.renames) ? args.renames : [])
+      .map((r: any) => ({ id: String(r?.id ?? ""), name: sanitizeName(r?.name) }))
+      .filter((r: { id: string; name: string }) => r.id && r.name);
+    if (!renames.length) {
+      return { content: [{ type: "text", text: "Error: renames is required — [{id, name}], e.g. the suggestions from suggest_frame_names" }] };
+    }
+    if (!pluginConnected() && httpPortOwned) {
+      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }] };
+    }
+    try {
+      const key = String(args.fileKey ?? defaultFileKey() ?? "");
+      const result = await runCommand("rename", { renames });
+      const applied: Array<{ id: string; name: string }> = Array.isArray(result?.applied) ? result.applied : [];
+      const patched = patchStoredNames(key, applied);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({ applied, notFound: result?.notFound ?? [], storePatched: patched }, null, 2),
+        }],
+      };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
     }

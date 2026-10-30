@@ -887,6 +887,52 @@ RAFAP — deliberate scope expansion.
 
 ---
 
+## Round 11 — Vision-driven frame renaming — DONE
+
+Executed exactly to the Round 10 spec (user-approved decisions:
+config-driven endpoint with personal Qwen fallback; lazy names only;
+selection-scoped, with an explicit `frameIds` alternative for stored
+frames).
+
+- **Plugin 3.9.0** — `rename` command: batch
+  `node.name = …` by id, one Figma undo step per batch. RAFAP's first
+  WRITE operation.
+- **`lib/vision-rename.ts`** — `isLazyName` (only `Frame \d+`-style
+  defaults are candidates), `collectRenameTargets` (structural nodes
+  only, root included only if its own name is lazy, deliberately-named
+  nodes untouchable, text content per target), `resolveVisionConfig`
+  (env `VISION_*` → `~/.config/opencode/opencode.json` provider,
+  Qwen-preferred; the key never leaves the bridge process),
+  `suggestNames` (OpenAI-compatible chat completions with a data-URL
+  PNG + layer facts; JSON extraction tolerates prose/fences/reasoning
+  output), `sanitizeName` (≤48 chars, whitespace-collapsed).
+- **MCP tools** — `suggest_frame_names` (dry-run: render at smart
+  scale — tiny frames are upscaled because some vision endpoints
+  reject images below ~512px — then one vision call per frame) and
+  `apply_frame_names` (plugin rename + `patchStoredNames`: stored
+  documents, frame records, and pages.json are patched so
+  `get_outline`/`get_file` reflect renames without a re-pull).
+- **Live-verified end-to-end** on the corpus file (Blank Navbar
+  180:1137, 8 lazy children): Qwen 3.8 27B on the user's e-INFRA
+  endpoint proposed `Frame 241`→Brand Header, `Frame 239`→Main Menu,
+  `Frame 240`→Settings Menu, `Frame 242`→Account Panel, …; apply
+  wrote all 8 (`storePatched: 8`), `get_outline` showed the new names
+  immediately, then everything was reverted to leave the file
+  untouched.
+- Found and documented an operational gotcha: an OpenCode-spawned
+  bridge orphaned by a service restart can keep port 3002 with old
+  code ("invalid command: rename"). Fix: kill it; a fresh follower
+  takes over within 30s and the plugin reconnects. In README
+  Troubleshooting.
+- Vision capability probed empirically: both `qwen3.8-27b` and
+  `gemma4` on the user's endpoint accept data-URL images ≥512px and
+  reject tiny ones — hence the smart render scale.
+- Skill `figma-build` updated: broader trigger description (selection
+  phrasings like "I selected the frame, code it") + renamer rows in
+  the quick reference.
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

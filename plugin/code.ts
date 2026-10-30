@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "3.8.1";
+const PLUGIN_VERSION = "3.9.0";
 const MAX_NODES_PER_EXTRACTION = 20000;
 const SVG_EXPORT_TYPES = new Set(["VECTOR", "BOOLEAN_OPERATION", "STAR", "LINE"]);
 
@@ -228,6 +228,26 @@ figma.ui.onmessage = async (msg: any) => {
         for (const node of sel) payload.push(await extractFramePayload(node));
       } else if (commandType === "export") {
         payload = await exportNodes(params.ids, params.format, params.scale);
+      } else if (commandType === "rename") {
+        // Round 11 — the first WRITE command: batch-rename nodes by id.
+        // The bridge scopes renames to lazy default names (Frame 336…);
+        // a whole batch executes as a single Figma undo step.
+        const renames: Array<{ id: string; name: string }> = params.renames ?? [];
+        if (!Array.isArray(renames) || renames.length === 0) {
+          throw new Error("rename needs {renames: [{id, name}]}");
+        }
+        const applied: Array<{ id: string; name: string }> = [];
+        const notFound: string[] = [];
+        for (const r of renames) {
+          const node = await figma.getNodeByIdAsync(String(r.id));
+          if (!node) {
+            notFound.push(String(r.id));
+            continue;
+          }
+          node.name = String(r.name).slice(0, 100);
+          applied.push({ id: String(r.id), name: node.name });
+        }
+        payload = { applied, notFound };
       } else if (commandType === "probe-fonts") {
         // Round 7 (C2) — runtime font-metrics probing for unseen families.
         payload = await probeFonts(params?.fonts);
