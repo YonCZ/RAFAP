@@ -45,6 +45,7 @@ import {
   type StoredPageIndex,
 } from "./lib/stitch.js";
 import { searchNodes } from "./lib/search.js";
+import { buildOutline } from "./lib/outline.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
@@ -1124,20 +1125,20 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
           ids: { type: "array", items: { type: "string" }, description: "Restrict to these top-level node ids" },
-          depth: { type: "number", description: "Prune the tree below this depth (REST depth semantics)" },
+          depth: { type: "number", description: "Prune the tree below this depth (REST depth semantics) — children below it are omitted; use get_outline for the full structure" },
         },
       },
     },
     {
       name: "get_nodes",
       description:
-        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file.",
+        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file. Caution: depth prunes children — a frame that looks empty at low depth may just be pruned; use get_outline when you need the whole picture.",
       inputSchema: {
         type: "object",
         properties: {
           fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
           ids: { type: "array", items: { type: "string" }, description: "Figma node ids, e.g. ['247:448']" },
-          depth: { type: "number", description: "Prune each subtree below this depth (counts from the node)" },
+          depth: { type: "number", description: "Prune each subtree below this depth (counts from the node) — children below it are omitted" },
         },
         required: ["ids"],
       },
@@ -1185,6 +1186,19 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
           query: { type: "string", description: "Case-insensitive substring matched against node names and text content" },
           type: { type: "string", description: "Node type filter, e.g. 'TEXT', 'INSTANCE', 'frame'" },
           limit: { type: "number", description: "Match cap (default 50)" },
+        },
+      },
+    },
+    {
+      name: "get_outline",
+      description:
+        "Compact whole-tree digest of frames — one indented line per node with id, name, type, size, child count, auto-layout summary (direction/gap/padding), and the FULL text content of TEXT nodes. No paints/fills/effects JSON, no depth pruning: this is the tool for UNDERSTANDING a design (structure + intent) before building or reviewing it, at a fraction of get_file/get_nodes token cost. Unstored frame ids are live-pulled from the plugin when connected. Follow up with get_nodes/get_images on specific ids for implementation detail.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
+          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids — defaults to all stored frames of the file" },
+          maxNodes: { type: "number", description: "Per-frame node cap before the outline truncates (default 400)" },
         },
       },
     },
@@ -1339,6 +1353,24 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           text: JSON.stringify({ fileKey: key, count: hits.length, nodes: hits }),
         }],
       };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+    }
+  }
+  if (request.params.name === "get_outline") {
+    const args = (request.params.arguments as any) ?? {};
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
+    const maxNodes = typeof args.maxNodes === "number" ? args.maxNodes : undefined;
+    try {
+      const frames = frameIds.length ? await resolveFramesForIds(key, frameIds) : listFramesForFile(key);
+      if (!frames.length) {
+        return {
+          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+        };
+      }
+      const outline = buildOutline(frames, { maxNodes });
+      return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${outline}` }] };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
     }

@@ -54,7 +54,7 @@ curl "http://127.0.0.1:3002/v1/files/local-<key>?fresh=1"
 
 To use it from your AI tooling, register it with OpenCode (see
 [MCP server](#mcp-server) — every session then gets `get_file`,
-`search_nodes`, `get_selection`, …).
+`get_outline`, `get_selection`, …).
 
 ## Troubleshooting
 
@@ -104,6 +104,7 @@ MCP client and the design is directly tool-accessible, no HTTP needed:
 | `get_metadata` | file-level maps | `components`, `componentSets`, `styles` — the design tokens |
 | `get_selection` | selection command | The differentiator: "grab what I selected" |
 | `search_nodes` | — | Name/text/type search over the stored design — REST has no equivalent |
+| `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning. The *understanding* view — `get_file` of the same file is ~17× larger |
 | `request_from_figma` | command queue | Fresh pulls on demand (`page-index`, `frame`, `selection`, `export`) |
 
 The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
@@ -128,6 +129,19 @@ holds it), it runs in *follower mode*: REST/MCP serve from the shared
 store, and live plugin commands are delegated to the port owner over
 localhost HTTP (`POST /api/agent/run`). Followers retry the port every 30s
 and take over if the owner exits — no manual babysitting.
+
+**Skill: `figma-build`.** The repo ships an OpenCode skill
+(`skills/figma-build/SKILL.md`) that teaches agents to *understand a design
+before building it*: always read `get_outline` first — never a depth-limited
+`get_nodes` (pruned children look exactly like empty frames), extract intent
+from text nodes, then fetch targeted detail. Install it globally:
+
+```sh
+ln -s <path-to-repo>/skills/figma-build ~/.config/opencode/skills/figma-build
+```
+
+Any agent that can call the `figma` MCP tools (OpenCode, Claude Code, …)
+benefits; the skill just encodes the workflow discipline.
 
 ## Font metrics (line heights)
 

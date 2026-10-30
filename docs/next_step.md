@@ -848,6 +848,42 @@ registration and follower mode.
   network access, no tokens/telemetry). The actual listing publish is a
   human action (your Figma account).
 
+## Round 10 — The understanding layer (get_outline + figma-build skill)
+
+Origin: a real agent session misread a design — `get_nodes depth=3`
+pruned the children of the side panels, and the agent reviewed "empty"
+panels that were actually full of text. Root cause: no cheap way to read
+the whole design (full REST JSON is enormous; depth limits lie by
+omission). Two-layer fix:
+
+**MCP tool `get_outline`** (`lib/outline.ts`, tested in
+`tests/outline.test.ts`): one indented line per node — id, name, type,
+size, child count, auto-layout summary (direction/gap/padding) — and the
+**full text content** of TEXT nodes. No paints/fills/effects, no depth
+pruning, per-frame node cap (default 400) with an explicit truncation
+note. Measured on the DevBoard corpus file: **5.9%** of `get_file`'s
+size for the same 33 frames. Unstored frameIds live-pull via the plugin
+(same path as `get_nodes`). `get_nodes`/`get_file` tool descriptions now
+warn that depth prunes children and point at `get_outline`.
+
+**Skill `figma-build`** (`skills/figma-build/SKILL.md`, symlinked into
+`~/.config/opencode/skills/`): the workflow discipline — outline first,
+extract intent from text nodes, targeted detail second, build last;
+never conclude a frame is empty from a depth-limited pull; the outline
+is the agent's eyes (agents aren't multimodal). Auto-discovered by
+OpenCode (verified: it surfaced in the session that created it).
+
+Token-usage rationale (researched 2026-10): MCP overhead comes from
+(1) tool-schema injection — already mitigated here by OpenCode's Code
+Mode catalog — and (2) tool *results*, which is what `get_outline`
+attacks: digest, not dump. Skills (~800 tokens, loaded on demand) encode
+workflow; MCP tools provide capability. Both layers, not either/or.
+
+Deferred to Round 11 (specced, user-approved): vision-driven frame
+renamer — selection-scoped, lazy-name-only (`Frame \d+`), dry-run →
+apply, OpenAI-compatible endpoint config (env) with personal Qwen
+fallback, plugin `rename` write command. First write operation in
+RAFAP — deliberate scope expansion.
 
 ---
 
@@ -871,4 +907,4 @@ registration and follower mode.
 - [ ] Library harvest closes remote style ids for all referenced libraries
 - [ ] Deviations doc: every entry either retired or marked fundamental with the experiment that proved it
 - [ ] Second-file transfer test passed (R7.4): known deviation classes reproduce, no new systemic class
-- [ ] MCP tool surface serves `get_file`/`get_nodes`/`get_images`/`get_metadata`/`get_selection`/`search_nodes`/`request_from_figma` in REST shapes
+- [ ] MCP tool surface serves `get_file`/`get_nodes`/`get_images`/`get_metadata`/`get_selection`/`search_nodes`/`get_outline`/`request_from_figma` in REST shapes
