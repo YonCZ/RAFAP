@@ -70,6 +70,28 @@ export function pruneDepth(node: Record<string, unknown>, depth: number): Record
   return { ...node, children: kids.map((c) => pruneDepth(c, depth - 1)) };
 }
 
+/**
+ * Find a node id inside the stored frame documents — child ids resolve
+ * without a plugin round-trip because the subtree is already in the
+ * store (agent field report: silent child-id misses were the #1 gap).
+ * Returns the owning frame and the node's subtree.
+ */
+export function findNodeDocument(
+  frames: StoredFrame[],
+  id: string,
+): { frame: StoredFrame; node: Record<string, unknown> } | null {
+  for (const frame of frames) {
+    const stack: Record<string, unknown>[] = [frame.document];
+    while (stack.length) {
+      const cur = stack.pop()!;
+      if (cur.id === id) return { frame, node: cur };
+      const kids = cur.children as Record<string, unknown>[] | undefined;
+      if (Array.isArray(kids)) for (const k of kids) stack.push(k);
+    }
+  }
+  return null;
+}
+
 export interface EnvelopeOptions {
   depth?: number;
   ids?: string[];

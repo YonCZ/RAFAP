@@ -2,7 +2,8 @@
  * Unit tests for the bridge-side envelope stitching (agent.md §7.1, §8.5).
  */
 import { describe, expect, it } from "vitest";
-import { buildFileEnvelope, buildNodesResponse, frameFileName, pruneDepth } from "../lib/stitch";
+import { buildFileEnvelope, buildNodesResponse, findNodeDocument, frameFileName, pruneDepth } from "../lib/stitch";
+import type { StoredFrame } from "../lib/stitch";
 
 const page = (id: string, ...children: { id: string; name: string }[]) => ({
   id,
@@ -122,5 +123,53 @@ describe("buildFileEnvelope depth (REST counts from the DOCUMENT root)", () => {
     const canvas = (env.document as any).children[0];
     expect(canvas.prototypeDevice).toEqual({ type: "NONE", rotation: "NONE" });
     expect(canvas.scrollBehavior).toBe("SCROLLS");
+  });
+});
+
+describe("findNodeDocument (Round 16.1 — child ids resolve from the store)", () => {
+  const nested: StoredFrame = {
+    id: "2:1",
+    name: "Parent",
+    document: {
+      id: "2:1",
+      name: "Parent",
+      type: "FRAME",
+      children: [
+        {
+          id: "2:2",
+          name: "Row",
+          type: "FRAME",
+          children: [
+            { id: "2:3", name: "Label", type: "TEXT", characters: "Hi" },
+            { id: "2:4", name: "Icon", type: "VECTOR" },
+          ],
+        },
+      ],
+    },
+  };
+
+  it("finds a grandchild node by id and returns its subtree", () => {
+    const hit = findNodeDocument([nested], "2:3");
+    expect(hit?.node.id).toBe("2:3");
+    expect(hit?.node.name).toBe("Label");
+    expect(hit?.frame.id).toBe("2:1");
+  });
+
+  it("finds a direct child", () => {
+    expect(findNodeDocument([nested], "2:2")?.node.name).toBe("Row");
+  });
+
+  it("returns null for unknown ids instead of throwing", () => {
+    expect(findNodeDocument([nested], "9:9")).toBeNull();
+    expect(findNodeDocument([], "2:3")).toBeNull();
+  });
+
+  it("searches every frame until it hits", () => {
+    const other: StoredFrame = {
+      id: "3:1",
+      name: "Other",
+      document: { id: "3:1", name: "Other", type: "FRAME", children: [{ id: "3:2", name: "X", type: "TEXT" }] },
+    };
+    expect(findNodeDocument([nested, other], "3:2")?.frame.id).toBe("3:1");
   });
 });

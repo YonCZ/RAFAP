@@ -40,6 +40,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import {
   buildFileEnvelope,
   buildNodesResponse,
+  findNodeDocument,
   frameFileName,
   type StoredFrame,
   type StoredPageIndex,
@@ -892,13 +893,33 @@ app.get("/v1/files/:key", async (req, res) => {
 
 /** Resolve node ids to stored frames, live-pulling missing ones via the
  *  plugin (the shared core of `GET /v1/files/:key/nodes` and the MCP
- *  `get_nodes` tool). Throws BridgeError(404) for anything unresolvable. */
+ *  `get_nodes` tool). Child ids resolve from stored frame subtrees first
+ *  (Round 16.1 — agent field report: child-id misses used to look like
+ *  "styling isn't stored"). Throws BridgeError(404) for anything
+ *  unresolvable. */
 async function resolveFramesForIds(key: string, ids: string[]): Promise<StoredFrame[]> {
   const frames: StoredFrame[] = [];
   for (const id of ids) {
     let frame = listFramesForFile(key, [id])[0] ?? null;
+    if (!frame) {
+      // The subtree may already be in the store inside a parent frame —
+      // serve it directly instead of failing (or a plugin round-trip).
+      const hit = findNodeDocument(listFramesForFile(key), id);
+      if (hit) {
+        frames.push({
+          id,
+          name: String(hit.node.name ?? id),
+          document: hit.node,
+          components: hit.frame.components,
+          componentSets: hit.frame.componentSets,
+          styles: hit.frame.styles,
+          fileKey: key,
+        });
+        continue;
+      }
+    }
     if (!frame && (pluginConnected() || !httpPortOwned)) {
-      // not stored yet — try pulling it live
+      // not stored — try pulling it live
       const payload = await runCommand("frame", { id });
       if (payload?.id) {
         persistResult({ type: "frame", id: "" } as AgentCommand, payload);
@@ -906,7 +927,11 @@ async function resolveFramesForIds(key: string, ids: string[]): Promise<StoredFr
       }
     }
     if (!frame) {
-      throw new BridgeError(404, `node ${id} not found in file ${key} — send it from the plugin or check the id`);
+      throw new BridgeError(
+        404,
+        `node ${id} not found in file ${key} — it is not stored and no stored frame contains it. ` +
+          `Select its frame in Figma and call prepare_build (or get the parent frame pulled), then try again.`,
+      );
     }
     frames.push(frame);
   }
