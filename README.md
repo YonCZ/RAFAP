@@ -172,8 +172,11 @@ export VISION_API_KEY="…"            # stays server-side, never logged
 
 With no env vars set, the bridge falls back to the first provider in
 `~/.config/opencode/opencode.json` that has a `baseURL` + `apiKey`
-(preferring Qwen-family models). Tiny frames are auto-rendered at a higher
-scale — some vision endpoints reject images below ~512px.
+(preferring Gemma, then Qwen — Gemma won an empirical naming shoot-out
+on the reference endpoint: fastest ~5s, cleanest JSON, most accurate and
+differentiated names). Set `VISION_MODEL` to override. Tiny frames are
+auto-rendered at a higher scale — some vision endpoints reject images
+below ~512px.
 
 
 ## Font metrics (line heights)

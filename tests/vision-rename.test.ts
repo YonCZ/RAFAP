@@ -42,9 +42,14 @@ describe("resolveVisionConfig", () => {
     expect(cfg).toMatchObject({ baseUrl: "https://x.example/v1", model: "my-model", apiKey: "k", source: "env VISION_*" });
   });
 
-  it("falls back to the OpenCode config, preferring Qwen models", () => {
+  it("falls back to the OpenCode config, preferring Gemma then Qwen models", () => {
     const cfg = resolveVisionConfig({}, () => opencodeConfig);
     expect(cfg).toMatchObject({ baseUrl: "https://llm.example/v1", model: "qwen3.8-27b", apiKey: "secret-key" });
+    const withGemma = resolveVisionConfig(
+      {},
+      () => opencodeConfig.replace('"qwen3.8-27b"', '"gemma4"'),
+    );
+    expect(withGemma).toMatchObject({ model: "gemma4" });
   });
 
   it("returns null when nothing is configured", () => {

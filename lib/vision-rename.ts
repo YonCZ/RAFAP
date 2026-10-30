@@ -28,9 +28,10 @@ export interface VisionConfig {
  *  1. env: VISION_BASE_URL + VISION_MODEL + VISION_API_KEY (any
  *     OpenAI-compatible endpoint)
  *  2. the user's OpenCode provider config (~/.config/opencode/opencode.json):
- *     first provider with a baseURL+apiKey, preferring a Qwen-family model
- *     (the personal default), then any vision-likely family
- *     (vl/vision/gemma/glm), then the first model.
+ *     first provider with a baseURL+apiKey, preferring a Gemma-family model
+ *     (empirically the most JSON-compliant and accurate at naming — see
+ *     Round 11 comparison), then Qwen, then any vision-likely family
+ *     (vl/vision/glm), then the first model.
  * Returns null when nothing usable is configured.
  */
 export function resolveVisionConfig(
@@ -55,8 +56,9 @@ export function resolveVisionConfig(
     const models: string[] = Object.keys(prov?.models ?? {});
     if (!baseUrl || !apiKey || !models.length) continue;
     const pick =
+      models.find((m) => /gemma/i.test(m)) ??
       models.find((m) => /qwen/i.test(m)) ??
-      models.find((m) => /(vl|vision|gemma|glm)/i.test(m)) ??
+      models.find((m) => /(vl|vision|glm)/i.test(m)) ??
       models[0];
     return { baseUrl, model: pick, apiKey, source: `opencode provider ${provId}` };
   }
