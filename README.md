@@ -76,7 +76,7 @@ To use it from your AI tooling, register it with OpenCode (see
   on its own.
 - **"node X not found in this file"** — the plugin operates on the file
   that is *open* in Figma. Open the file the node belongs to.
-- After changing plugin code: `npm run publish`, then
+- After changing plugin code: `npm run build:plugin`, then
   `npm run plugin:reload` to reopen it in Figma without re-importing
   (macOS, needs Accessibility permission for your terminal).
 
@@ -238,7 +238,7 @@ plugin-API limits. See `report.md` and `docs/rest-parity-deviations.md`.
 ```bash
 npm run check    # tsc for bridge + plugin (CI runs this on every push)
 npm test         # vitest unit tests (mapping rules, metrics, harness)
-npm run publish  # sync build to a dev plugin folder
+npm run build:plugin    # bundle the plugin to dist/plugin/
 npm run plugin:reload  # reopen the plugin in Figma (macOS reload dance)
 ```
 

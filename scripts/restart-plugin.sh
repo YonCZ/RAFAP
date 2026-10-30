@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Reopen the RAFAP dev plugin in Figma — the "reload dance".
 #
-# Use after `npm run publish` (or a plugin rebuild + manual copy) to make
-# Figma run the new plugin code without re-importing the manifest. Requires:
+# Use after `npm run build:plugin` to make Figma reopen the rebuilt dev
+# plugin without re-importing the manifest. Requires:
 #   • Figma desktop running, with the file you work on open
 #   • macOS with System Events (Accessibility) permission granted to the
 #     terminal that runs this script

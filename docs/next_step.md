@@ -933,6 +933,35 @@ frames).
 
 ---
 
+## Round 12 — Unification: one folder, no sibling plugin copy
+
+The project lived as `figma-bridge/` next to a sibling `Figma Agent/`
+dev-plugin folder (the publish target) plus a skill symlink in
+`~/.config/opencode/skills/`. Now everything is one folder,
+`Projects/FigmaAgent/` — the repo root itself:
+
+- **Plugin in-repo**: Figma imports the manifest from
+  `dist/plugin/manifest.json` (built by `npm run build:plugin` —
+  esbuild was already a devDependency and the script already existed
+  from Round 9; only the sibling-copy `publish` flow was legacy).
+  `publish` is now an alias for build + reload hint. The sibling
+  `Figma Agent/` folder is retired (deleted after re-import).
+  `dist/` is gitignored; `plugin:reload` (menu navigation by plugin
+  *name*) works unchanged.
+- **Skill by config, not symlink**: the user's `opencode.json` gets a
+  `skills: ["<repo>/skills"]` entry instead of a symlink into
+  `~/.config/opencode/skills` (the symlink remains the README option
+  for other users).
+- **MCP registration**: `opencode mcp add figma --global` re-pointed at
+  the new path (CLI, preserves unrelated config).
+- Migration verified in place: `npm run check`, 159 tests, plugin
+  build, MCP smoke through the new path, plugin reconnect, end-to-end
+  suggest/apply.
+- Old workspace root keeps only `Agent Plugin/` (production, port
+  3001 — untouched by policy).
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

@@ -2,7 +2,7 @@
   "name": "rafap",
   "private": true,
   "type": "module",
-  "description": "RAFAP (Rest API Figma Agent Plugin) — local, rate-limit-free drop-in replacement for the Figma REST API.",
+  "description": "RAFAP (Rest API Figma Agent Plugin) \u2014 local, rate-limit-free drop-in replacement for the Figma REST API.",
   "scripts": {
     "start": "tsx bridge-server.ts",
     "start:dev": "BRIDGE_PORT=3002 tsx bridge-server.ts",
@@ -12,7 +12,7 @@
     "build:plugin": "esbuild plugin/code.ts --bundle --format=iife --outfile=dist/plugin/code.js && cp plugin/ui.html plugin/manifest.json dist/plugin/",
     "test": "vitest run",
     "golden-diff": "tsx tools/golden-diff.ts",
-    "publish": "cp plugin/code.ts plugin/ui.html plugin/manifest.json \"../Figma Agent/\" && cp -R plugin/lib \"../Figma Agent/\" && cd \"../Figma Agent\" && npm run build && echo 'synced to the Figma Agent dev plugin — reopen the plugin in Figma to load it'"
+    "publish": "npm run build:plugin && echo 'built dist/plugin \u2014 reopen the plugin in Figma (npm run plugin:reload)'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
