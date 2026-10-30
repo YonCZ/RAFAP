@@ -162,6 +162,11 @@ patched so `get_outline` reflects the new names instantly. Only default
 names (`Frame \d+`, `Group 5`, …) are ever touched; deliberately-named
 nodes are untouchable.
 
+**One-click from the plugin panel** — the same pipeline runs without an
+agent: select frames in Figma, click **Rename Selected** in the plugin
+panel. It suggests via the vision model and applies immediately
+(`POST /api/rename/selected`); one ⌘Z reverts the whole batch.
+
 The vision endpoint is any OpenAI-compatible chat-completions API:
 
 ```sh

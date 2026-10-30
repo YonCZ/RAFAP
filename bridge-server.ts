@@ -51,6 +51,8 @@ import {
   resolveVisionConfig,
   sanitizeName,
   suggestNames,
+  suggestionsToRenames,
+  type VisionConfig,
 } from "./lib/vision-rename.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
@@ -801,6 +803,19 @@ app.post("/api/page-index", (req, res) => {
   res.json({ status: "success" });
 });
 
+// Round 13 — one-click "Rename Selected" from the plugin panel. The plugin
+// UI calls this; the bridge orchestrates through the existing command queue
+// (selection → export → rename), so the plugin itself needs no new message
+// types. One undo step reverts the whole batch.
+app.post("/api/rename/selected", async (_req, res) => {
+  try {
+    const { status, body } = await renameSelectionOneClick();
+    res.status(status).json(body);
+  } catch (e) {
+    res.status(500).json({ error: (e as Error).message });
+  }
+});
+
 // --- legacy read endpoints (v2 agent flow, now backed by store v2) ---------
 
 app.get("/api/frames", (_req, res) => {
@@ -1284,6 +1299,99 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
   ],
 }));
 
+// ---------------------------------------------------------------------------
+// Round 13 — shared vision-rename pipeline.
+// One implementation used by BOTH surfaces: the suggest_frame_names MCP
+// tool (dry-run) and the one-click "Rename Selected" panel button
+// (POST /api/rename/selected, which also applies).
+// ---------------------------------------------------------------------------
+
+/**
+ * Collect lazy-name targets inside the given frames, render each frame
+ * (smart-scaled so vision endpoints accept it), and ask the vision model
+ * for names. Returns per-target suggestions (suggestedName null when the
+ * model had nothing usable).
+ */
+async function suggestRenamesForFrames(
+  cfg: VisionConfig,
+  frames: StoredFrame[],
+  key: string,
+): Promise<{ suggestions: Array<Record<string, unknown>>; withNames: number; renderError?: string }> {
+  const suggestions: Array<Record<string, unknown>> = [];
+  let withNames = 0;
+  for (const frame of frames) {
+    const targets = collectRenameTargets(frame.document);
+    if (!targets.length) continue;
+    // Vision endpoints reject tiny images — render so min(dim) ≥ 512px.
+    const bb = (frame.document as any)?.absoluteBoundingBox;
+    const minDim = Math.min(Number(bb?.width) || 0, Number(bb?.height) || 0) || 512;
+    const scale = Math.max(1, Math.min(4, Math.ceil(512 / minDim)));
+    const images = await exportImagesForKey(key, [frame.id], "png", scale);
+    const asset = assetPath(key, frame.id, "png");
+    if (!images[frame.id] || !fs.existsSync(asset)) {
+      return { suggestions: [], withNames: 0, renderError: `could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` };
+    }
+    const b64 = fs.readFileSync(asset).toString("base64");
+    const names = await suggestNames(cfg, b64, targets);
+    for (const t of targets) {
+      const suggestedName = names[t.id] ?? null;
+      if (suggestedName) withNames++;
+      suggestions.push({
+        id: t.id,
+        currentName: t.currentName,
+        suggestedName,
+        type: t.type,
+        size: `${t.width}x${t.height}`,
+        textInside: t.textInside,
+      });
+    }
+  }
+  return { suggestions, withNames };
+}
+
+/**
+ * One-click flow behind the plugin panel's "Rename Selected" button:
+ * scope = current Figma selection (+ lazy descendants) → vision suggest →
+ * apply as ONE undo step → patch the store so get_outline reflects it.
+ */
+async function renameSelectionOneClick(): Promise<{ status: number; body: Record<string, unknown> }> {
+  const cfg = resolveVisionConfig();
+  if (!cfg) {
+    return {
+      status: 503,
+      body: { error: "no vision endpoint configured — set VISION_BASE_URL + VISION_MODEL + VISION_API_KEY, or configure a provider in ~/.config/opencode/opencode.json" },
+    };
+  }
+  if (!pluginConnected() && httpPortOwned) {
+    return { status: 503, body: { error: "the Figma plugin is not connected — reopen the Figma Agent panel" } };
+  }
+  const picked = await runCommand("selection", {});
+  const frames = (Array.isArray(picked) ? picked : []) as StoredFrame[];
+  if (!frames.length) {
+    return { status: 400, body: { error: "nothing is selected in Figma — select the frames to rename" } };
+  }
+  for (const f of frames) {
+    if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
+  }
+  const key = String(frames[0]?.fileKey ?? defaultFileKey() ?? "");
+  const { suggestions, withNames, renderError } = await suggestRenamesForFrames(cfg, frames, key);
+  if (renderError) return { status: 502, body: { error: renderError } };
+  if (!suggestions.length) {
+    return {
+      status: 200,
+      body: { applied: [], count: 0, message: 'nothing to rename — every node in the selection has a deliberate name (only default names like "Frame 336" are candidates)' },
+    };
+  }
+  const renames = suggestionsToRenames(suggestions as Array<{ id: unknown; suggestedName: unknown }>);
+  if (!renames.length) {
+    return { status: 502, body: { error: "vision model returned no usable names", suggestions } };
+  }
+  const result = await runCommand("rename", { renames });
+  const applied: Array<{ id: string; name: string }> = Array.isArray(result?.applied) ? result.applied : [];
+  const patched = patchStoredNames(key, applied);
+  return { status: 200, body: { applied, notFound: result?.notFound ?? [], storePatched: patched, model: cfg.model } };
+}
+
 mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "list_figma_frames") {
     return { content: [{ type: "text", text: JSON.stringify(listAllFrames(), null, 2) }] };
@@ -1487,34 +1595,9 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         key = String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? "");
       }
 
-      const suggestions: Array<Record<string, unknown>> = [];
-      let withNames = 0;
-      for (const frame of frames) {
-        const targets = collectRenameTargets(frame.document);
-        if (!targets.length) continue;
-        // Vision endpoints reject tiny images — render so min(dim) ≥ 512px.
-        const bb = (frame.document as any)?.absoluteBoundingBox;
-        const minDim = Math.min(Number(bb?.width) || 0, Number(bb?.height) || 0) || 512;
-        const scale = Math.max(1, Math.min(4, Math.ceil(512 / minDim)));
-        const images = await exportImagesForKey(key, [frame.id], "png", scale);
-        const asset = assetPath(key, frame.id, "png");
-        if (!images[frame.id] || !fs.existsSync(asset)) {
-          return { content: [{ type: "text", text: `Error: could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` }] };
-        }
-        const b64 = fs.readFileSync(asset).toString("base64");
-        const names = await suggestNames(cfg, b64, targets);
-        for (const t of targets) {
-          const suggestedName = names[t.id] ?? null;
-          if (suggestedName) withNames++;
-          suggestions.push({
-            id: t.id,
-            currentName: t.currentName,
-            suggestedName,
-            type: t.type,
-            size: `${t.width}x${t.height}`,
-            textInside: t.textInside,
-          });
-        }
+      const { suggestions, withNames, renderError } = await suggestRenamesForFrames(cfg, frames, key);
+      if (renderError) {
+        return { content: [{ type: "text", text: `Error: ${renderError}` }] };
       }
       if (!suggestions.length) {
         return { content: [{ type: "text", text: "nothing to rename — every frame in scope already has a deliberate name (only default names like \"Frame 336\" are candidates)" }] };

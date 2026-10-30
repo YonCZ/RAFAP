@@ -964,6 +964,32 @@ dev-plugin folder (the publish target) plus a skill symlink in
 
 ---
 
+## Round 13 — "Rename Selected": one-click renaming from the panel
+
+Renaming was agent-only (MCP tools). Now the plugin panel has a
+`Rename Selected` button — the same Round 11 pipeline as a human flow:
+
+- **No new plugin commands.** The button POSTs a new bridge endpoint,
+  `/api/rename/selected`, which orchestrates through the existing
+  command queue (`selection` → `export` → `rename`). The selection
+  scope (+ lazy descendants) is fetched live from the plugin, so the
+  plugin itself changed only by version (3.10.0) and UI.
+- **Shared pipeline.** The suggest loop was factored out of the
+  `suggest_frame_names` MCP handler into `suggestRenamesForFrames`
+  (used by both surfaces) plus `renameSelectionOneClick`; the
+  suggestion→rename filtering lives in `lib/vision-rename.ts` as
+  `suggestionsToRenames` (vitest-covered), so the MCP dry-run and the
+  one-click apply filter identically.
+- **UI**: inline button on the connection row (flex, right-aligned,
+  10px dark styling) — panel keeps its 220×52 size. It disables while
+  the vision call runs (~5s) and the status line reports
+  `✓ renamed N nodes — ⌘Z to undo` / errors.
+- One-click semantics (user-approved): apply immediately, no review
+  step — safe rails are lazy-names-only scoping and the single undo
+  step; scope is selection + descendants, matching the agent flow.
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

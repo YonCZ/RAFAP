@@ -6,6 +6,7 @@ import {
   resolveVisionConfig,
   sanitizeName,
   suggestNames,
+  suggestionsToRenames,
   type RenameTarget,
   type VisionConfig,
 } from "../lib/vision-rename.js";
@@ -187,5 +188,26 @@ describe("suggestNames", () => {
   it("throws when the reply contains no JSON", async () => {
     const f = (async () => okReply("I cannot see images")) as unknown as typeof fetch;
     await expect(suggestNames(cfg, "aGVsbG8=", targets, f)).rejects.toThrow(/no JSON/);
+  });
+});
+
+describe("suggestionsToRenames (Round 13 — one-click button path)", () => {
+  it("keeps only suggestions with a usable name, sanitized", () => {
+    const out = suggestionsToRenames([
+      { id: "1:1", suggestedName: "  \"Top Nav\"  " },
+      { id: "1:4", suggestedName: null },
+      { id: "1:7", suggestedName: "" },
+      { id: "1:9", suggestedName: "Footer Links" },
+      { id: "", suggestedName: "no id" },
+    ]);
+    expect(out).toEqual([
+      { id: "1:1", name: "Top Nav" },
+      { id: "1:9", name: "Footer Links" },
+    ]);
+  });
+
+  it("handles empty/absent input", () => {
+    expect(suggestionsToRenames([])).toEqual([]);
+    expect(suggestionsToRenames(undefined as unknown as [])).toEqual([]);
   });
 });

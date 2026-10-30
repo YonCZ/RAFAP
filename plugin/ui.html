@@ -3,11 +3,21 @@
 <head>
   <style>
     /* Minimalistic two-line panel: connection status + what is being sent.
-       Everything else (buttons, title) was removed — the command queue
-       makes manual sends unnecessary, and a small window does not eat
-       canvas space. Keep the window small in code.ts (figma.showUI). */
+       Round 13 adds one inline "Rename Selected" button (one-click vision
+       rename of the selection's lazy-named nodes) on the connection row —
+       the panel keeps its 220x52 size. Everything else (buttons, title)
+       stays removed: the command queue makes manual sends unnecessary. */
     body { font-family: sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 7px 9px; }
     div { font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #row1 { display: flex; align-items: center; gap: 6px; }
+    #row1 #conn { flex: 1; min-width: 0; }   /* ellipsize, leave room for the button */
+    #renameBtn {
+      font-size: 10px; line-height: 12px; padding: 1px 7px; flex: none;
+      background: #2d333b; color: #cdd9e5; border: 1px solid #444c56; border-radius: 3px;
+      cursor: pointer; white-space: nowrap;
+    }
+    #renameBtn:hover { background: #3d444d; }
+    #renameBtn:disabled { opacity: 0.5; cursor: wait; }
     #conn.on  { color: #7ee787; }   /* green — bridge connected */
     #conn.off { color: #ff7b72; }   /* red — bridge offline */
     #conn { color: #bbb; }          /* connecting… */
@@ -17,7 +27,10 @@
   </style>
 </head>
 <body>
-  <div id="conn">connecting…</div>
+  <div id="row1">
+    <div id="conn">connecting…</div>
+    <button id="renameBtn" title="AI-rename the selected frames' unnamed layers (one undo step)">Rename Selected</button>
+  </div>
   <div id="status">idle</div>
 
   <script>
@@ -79,6 +92,36 @@
         }
       }
     }
+    // --- "Rename Selected" button (Round 13) -------------------------------
+    // One-click: bridge asks the plugin for the selection via the command
+    // queue, renders + vision-suggests + applies (one undo step). The
+    // vision call takes ~5s, so the button disables while running.
+    const renameBtn = document.getElementById("renameBtn");
+    renameBtn.onclick = async () => {
+      renameBtn.disabled = true;
+      status("renaming… (vision model, ~5s)", "");
+      try {
+        const res = await fetch(BRIDGE + "/api/rename/selected", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          status("✗ " + (data.error || "rename failed"), "err");
+        } else if ((data.applied || []).length === 0) {
+          status(data.message || "nothing renamed", "");
+        } else {
+          const n = data.applied.length;
+          status("✓ renamed " + n + (n === 1 ? " node" : " nodes") + " — ⌘Z to undo", "ok");
+        }
+      } catch {
+        status("✗ bridge offline (port 3002)", "err");
+      } finally {
+        renameBtn.disabled = false;
+      }
+    };
+
     pollAgent();
 
     window.onmessage = async (event) => {

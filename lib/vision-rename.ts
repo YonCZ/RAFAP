@@ -165,6 +165,24 @@ export function sanitizeName(s: unknown): string {
   return s.replace(/\s+/g, " ").trim().replace(/^["'\u201c]+|["'\u201d]+$/g, "").slice(0, 48).trim();
 }
 
+/**
+ * Round 13 — turn dry-run suggestions into an apply-ready rename list:
+ * keep only entries with a usable suggested name. Shared by the
+ * apply_frame_names MCP tool and the one-click panel button
+ * (POST /api/rename/selected) so both paths filter identically.
+ */
+export function suggestionsToRenames(
+  suggestions: Array<{ id: unknown; suggestedName: unknown }>,
+): Array<{ id: string; name: string }> {
+  const renames: Array<{ id: string; name: string }> = [];
+  for (const s of suggestions ?? []) {
+    const id = String(s?.id ?? "");
+    const name = sanitizeName(s?.suggestedName);
+    if (id && name) renames.push({ id, name });
+  }
+  return renames;
+}
+
 /** Pull the first JSON object out of a model reply (handles prose + fences). */
 export function extractJson(text: string): Record<string, unknown> | null {
   const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
