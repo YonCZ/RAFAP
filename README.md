@@ -53,8 +53,8 @@ curl "http://127.0.0.1:3002/v1/files/local-<key>?fresh=1"
 ```
 
 To use it from your AI tooling, register it with OpenCode (see
-[MCP server](#mcp-server) — every session then gets `get_file`,
-`get_outline`, `get_selection`, …).
+[MCP server](#mcp-server) — every session then gets `prepare_build`,
+`get_outline`, `get_flex_layout`, …).
 
 ## Troubleshooting
 
@@ -111,22 +111,21 @@ MCP client and the design is directly tool-accessible, no HTTP needed:
 
 | Tool | Maps to | Note |
 |---|---|---|
-| `get_file` | `GET /v1/files/:key` | Whole document tree; `fileKey` optional (defaults to the most recently pulled file), `ids`/`depth` supported |
+| `prepare_build` | selection / frames | **The build kit — call first.** One response: whole-tree outline (structure + all text) + flexbox translation of the auto-layout (layout intent). Defaults to the current Figma selection |
 | `get_nodes` | `GET /v1/files/:key/nodes` | By id; unstored ids are live-pulled from the plugin |
 | `get_images` | `GET /v1/images/:key` | PNG/JPG/SVG/PDF — SVG and PDF supersede REST here; URLs are served by the bridge and never expire |
 | `get_metadata` | file-level maps | `components`, `componentSets`, `styles` — the design tokens |
 | `get_selection` | selection command | The differentiator: "grab what I selected" |
 | `search_nodes` | — | Name/text/type search over the stored design — REST has no equivalent |
-| `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning. The *understanding* view — `get_file` of the same file is ~17× larger |
+| `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning |
 | `get_flex_layout` | — | Paste-ready CSS flexbox translation of the auto-layout — the layout **intent** (fixed → px, hug → fit-content, fill → flex-grow/align-self:stretch, gaps, padding, alignment). Build layout from this, not from bounding boxes |
-| `suggest_frame_names` | — | Dry-run AI renaming of lazy frame names (`Frame 336` → `Top Nav`): renders the selection, sends PNG + layer facts to a vision LLM, returns proposals |
-| `apply_frame_names` | write | Applies `[{id, name}]` renames in Figma (one undo step) and patches the stored design so `get_outline` reflects them immediately |
-| `describe_frames` | — | The agent's eyes: renders the frames, asks a vision LLM to describe the visual structure (regions, hierarchy, grouping, spacing) as markdown with layer-id references that join `get_outline`. Use before building/reproducing a design |
-| `request_from_figma` | command queue | Fresh pulls on demand (`page-index`, `frame`, `selection`, `export`) |
+| `list_figma_frames` | — | What is stored (id, name, file key, when) |
 
-The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
-`get_latest_figma_frame`) remain for compatibility. Returns are REST-shaped,
-so prompts and SDKs written against the Figma REST API work unchanged.
+Nine tools, one ritual: **`prepare_build` → targeted detail → build**.
+The agent-facing surface is deliberately small — the context burners the
+REST surface allowed (`get_file`, full-tree pulls) are HTTP-only now.
+Returns stay REST-shaped, so SDK code against the Figma REST API keeps
+working over HTTP.
 
 **With OpenCode** (V2), one command registers the bridge for every project:
 
@@ -136,7 +135,7 @@ opencode mcp list   # → ✓ figma connected
 ```
 
 The OpenCode service then spawns the bridge automatically and its tools
-appear as `figma.get_file`, `figma.search_nodes`, … The plugin keeps
+appear as `figma.prepare_build`, `figma.search_nodes`, … The plugin keeps
 talking to port 3002, so the OpenCode-spawned bridge should be the only
 one running (`npm run start:dev` would race it — see below).
 
@@ -148,10 +147,10 @@ localhost HTTP (`POST /api/agent/run`). Followers retry the port every 30s
 and take over if the owner exits — no manual babysitting.
 
 **Skill: `figma-build`.** The repo ships an OpenCode skill
-(`skills/figma-build/SKILL.md`) that teaches agents to *understand a design
-before building it*: always read `get_outline` first — never a depth-limited
-`get_nodes` (pruned children look exactly like empty frames), extract intent
-from text nodes, then fetch targeted detail. Install it globally:
+(`skills/figma-build/SKILL.md`) that teaches agents the build contract:
+`prepare_build` first (structure + text + layout intent in one call), then
+targeted detail, then build — never layout from bounding-box pixels.
+Install it globally:
 
 ```sh
 ln -s <path-to-repo>/skills/figma-build ~/.config/opencode/skills/figma-build
@@ -160,30 +159,20 @@ ln -s <path-to-repo>/skills/figma-build ~/.config/opencode/skills/figma-build
 Any agent that can call the `figma` MCP tools (OpenCode, Claude Code, …)
 benefits; the skill just encodes the workflow discipline.
 
-## Vision renaming (`suggest_frame_names` / `apply_frame_names`)
+## Vision renaming — the **Rename Selected** button
 
 Frame names are the cheapest context signal an agent gets from a design —
 "Frame 336" carries no intent. The renamer fixes lazy default names with a
 vision LLM: it renders the selection, sends the PNG plus each layer's
-type/size/text content, and returns proposals (dry-run). Review them, then
-apply — the whole batch is one Figma undo step, and the stored design is
-patched so `get_outline` reflects the new names instantly. Only default
-names (`Frame \d+`, `Group 5`, …) are ever touched; deliberately-named
-nodes are untouchable.
+type/size/text content, proposes names, and applies them immediately.
+The whole batch is one Figma undo step (⌘Z reverts it), and the stored
+design is patched so the digest tools reflect the new names instantly.
+Only default names (`Frame \d+`, `Group 5`, …) are ever touched;
+deliberately-named nodes are untouchable.
 
-**One-click from the plugin panel** — the same pipeline runs without an
-agent: select frames in Figma, click **Rename Selected** in the plugin
-panel. It suggests via the vision model and applies immediately
-(`POST /api/rename/selected`); one ⌘Z reverts the whole batch.
-
-**Seeing the design (`describe_frames`)** — the same render→vision
-machinery answers a different question: not "what are these layers
-called" but "what does this look like". It returns a markdown
-description of the visual structure — regions and their roles, visual
-hierarchy, grouping, spacing — referencing layer ids, so it joins with
-`get_outline`. Non-multimodal agents use it before building to avoid
-reconstructing the layout from bounding-box arithmetic (and inventing
-theories the design does not support).
+No agent involvement needed: select frames in Figma, click **Rename
+Selected** in the plugin panel (`POST /api/rename/selected`). Vision stays
+server-side in exactly this one place — the MCP surface is vision-free.
 
 The vision endpoint is any OpenAI-compatible chat-completions API:
 

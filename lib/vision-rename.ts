@@ -162,7 +162,7 @@ export function collectRenameTargets(document: unknown): RenameTarget[] {
 /**
  * Smart render scale for vision endpoints: they reject images below
  * ~512px, so small frames are upscaled (max 4×). Large frames are fine
- * at 1×. Shared by the renamer and the describe tool (Round 14).
+ * at 1×.
  */
 export function computeRenderScale(width: number, height: number): number {
   const minDim = Math.min(Number(width) || 0, Number(height) || 0) || 512;

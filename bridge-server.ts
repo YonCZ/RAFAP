@@ -51,12 +51,10 @@ import {
   collectRenameTargets,
   computeRenderScale,
   resolveVisionConfig,
-  sanitizeName,
   suggestNames,
   suggestionsToRenames,
   type VisionConfig,
 } from "./lib/vision-rename.js";
-import { collectStructuralFacts, describeFrame } from "./lib/vision-describe.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
@@ -282,8 +280,8 @@ function listFramesForFile(key: string, only?: string[]): StoredFrame[] {
 }
 
 /** Round 11 — after a plugin rename, patch the stored documents (node
- *  names, frame record names, pages.json children) so get_outline /
- *  get_file reflect the new names without a re-pull. Best-effort: ids not
+ *  names, frame record names, pages.json children) so the digest tools
+ *  reflect the new names without a re-pull. Best-effort: ids not
  *  in the store (never-pulled subtrees) are simply skipped. */
 function patchStoredNames(key: string, applied: Array<{ id: string; name: string }>): number {
   const byId = new Map(applied.map((r) => [r.id, r.name]));
@@ -471,7 +469,7 @@ function persistResult(cmd: AgentCommand, payload: any): void {
     return;
   }
   if (cmd.type === "export") return; // assets handled by the /v1/images caller
-  if (cmd.type === "rename") return; // store patching handled by apply_frame_names
+  if (cmd.type === "rename") return; // store patching handled by the rename endpoint
   const frames = Array.isArray(payload) ? payload : payload?.id ? [payload] : [];
   for (const f of frames) if (f?.id) saveFrame(f);
 }
@@ -1149,7 +1147,7 @@ export { app, server };
 // Optional MCP tools (stdio) — registered when spawned by an MCP client.
 // ---------------------------------------------------------------------------
 
-const mcpServer = new Server({ name: "figma-agent-bridge", version: "3.1.0" }, { capabilities: { tools: {} } });
+const mcpServer = new Server({ name: "figma-agent-bridge", version: "4.0.0" }, { capabilities: { tools: {} } });
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -1159,54 +1157,21 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: { type: "object", properties: {} },
     },
     {
-      name: "get_figma_frame",
+      name: "prepare_build",
       description:
-        "The full REST-shaped design tree of one frame, by its Figma node id (e.g. '247:448').",
-      inputSchema: {
-        type: "object",
-        properties: { id: { type: "string", description: "Figma node id" } },
-        required: ["id"],
-      },
-    },
-    {
-      name: "get_latest_figma_frame",
-      description: "The most recently stored frame (REST-shaped tree).",
-      inputSchema: { type: "object", properties: {} },
-    },
-    {
-      name: "request_from_figma",
-      description:
-        "Ask the open Figma plugin for fresh data on demand: type 'page-index' (all pages + top-level frames), 'frame' (full design tree by node id, e.g. '247:448'), 'selection' (whatever is selected right now), or 'export' (PNG/JPG/SVG/PDF images by node ids). Requires the plugin open in Figma.",
+        "The build kit for what you are about to implement — call this FIRST when the user says 'build this, I selected it in Figma'. One response, two sections per frame: the outline (structure + ALL text content) and the flexbox translation of the auto-layout (layout intent: fixed → px, hug → fit-content, fill → flex-grow/align-self:stretch). Scope defaults to the current Figma selection (live-pulled and stored); pass frameIds to target stored frames instead. Then: get_nodes on specific ids for fills/effects/radii, get_images for assets.",
       inputSchema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: ["page-index", "frame", "selection", "export"], description: "What to fetch" },
-          id: { type: "string", description: "Figma node id — required for type 'frame'" },
-          ids: { type: "array", items: { type: "string" }, description: "Node ids — required for type 'export'" },
-          format: { type: "string", enum: ["PNG", "JPG", "SVG", "PDF"] },
-          scale: { type: "number" },
-        },
-        required: ["type"],
-      },
-    },
-    // --- Round 8: the parity-grade REST-shaped surface -----------------
-    {
-      name: "get_file",
-      description:
-        "GET /v1/files/:key — the whole file as one REST-shaped document tree (pages → frames → nodes), plus the file-level components/componentSets/styles maps. Cached pulls return instantly. Defaults to the most recently pulled file.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
-          ids: { type: "array", items: { type: "string" }, description: "Restrict to these top-level node ids" },
-          depth: { type: "number", description: "Prune the tree below this depth (REST depth semantics) — children below it are omitted; use get_outline for the full structure" },
+          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids — defaults to the current Figma selection" },
+          fileKey: { type: "string", description: "File key (defaults to the selection's / most recently pulled file)" },
         },
       },
     },
     {
       name: "get_nodes",
       description:
-        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file. Prefer get_outline for structural exploration (a compact digest of the whole tree) and describe_frames for what the design visually looks like — get_nodes returns full REST payloads that can be very large. Caution: depth prunes children — a frame that looks empty at low depth may just be pruned; use get_outline when you need the whole picture.",
+        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file. Prefer prepare_build / get_outline for structural understanding (a compact digest of the whole tree) — get_nodes returns full REST payloads that can be very large. Caution: depth prunes children — a frame that looks empty at low depth may just be pruned; use get_outline when you need the whole picture.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1246,7 +1211,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_selection",
       description:
-        "Whatever is selected in Figma right now, as a REST-shaped nodes response (the differentiator — 'grab what I selected'). Selected subtrees are also stored, so follow-up get_nodes/get_file see them. Requires the plugin open in Figma.",
+        "Whatever is selected in Figma right now, as a REST-shaped nodes response (the differentiator — 'grab what I selected'). Selected subtrees are also stored, so follow-up get_nodes sees them. Requires the plugin open in Figma.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -1266,25 +1231,13 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_outline",
       description:
-        "Compact whole-tree digest of frames — one indented line per node with id, name, type, size, child count, auto-layout summary (direction/gap/padding), and the FULL text content of TEXT nodes. No paints/fills/effects JSON, no depth pruning: this is the tool for UNDERSTANDING a design (structure + intent) before building or reviewing it, at a fraction of get_file/get_nodes token cost. Unstored frame ids are live-pulled from the plugin when connected. Follow up with get_nodes/get_images on specific ids for implementation detail.",
+        "Compact whole-tree digest of frames — one indented line per node with id, name, type, size, child count, auto-layout summary (direction/gap/padding), and the FULL text content of TEXT nodes. No paints/fills/effects JSON, no depth pruning: this is the tool for UNDERSTANDING a design (structure + intent) before building or reviewing it, at a fraction of get_nodes token cost. Unstored frame ids are live-pulled from the plugin when connected. Follow up with get_nodes/get_images on specific ids for implementation detail.",
       inputSchema: {
         type: "object",
         properties: {
           fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
           frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids — defaults to all stored frames of the file" },
           maxNodes: { type: "number", description: "Per-frame node cap before the outline truncates (default 400)" },
-        },
-      },
-    },
-    {
-      name: "suggest_frame_names",
-      description:
-        "Dry-run AI renaming of lazy Figma frame names (Frame 336 → 'Top Nav'): renders the frames, sends the PNG plus each layer's type/size/text content to a vision LLM, and returns proposed names. Scope defaults to the current selection (plus its unnamed children); pass frameIds to target stored frames instead. Only default names like 'Frame 336'/'Group 5' are ever proposed — deliberately-named nodes are untouched. Nothing is written; review the suggestions, then apply with apply_frame_names. The vision endpoint comes from VISION_BASE_URL/VISION_MODEL/VISION_API_KEY env vars, or the user's OpenCode provider config.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids to rename inside (defaults to the current Figma selection)" },
-          fileKey: { type: "string", description: "File key (defaults to the selection's / most recently pulled file)" },
         },
       },
     },
@@ -1300,43 +1253,17 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
-    {
-      name: "describe_frames",
-      description:
-        "What the design actually LOOKS like: renders the frames and asks a vision model to describe the visual structure — layout regions and their roles, visual hierarchy, grouping, alignment, spacing — as markdown that references layer ids (joins with get_outline). Use when building or reproducing a design, or when the numbers alone do not explain the layout. Scope defaults to the current Figma selection; pass frameIds to target stored frames. Vision endpoint from VISION_BASE_URL/VISION_MODEL/VISION_API_KEY env vars or the user's OpenCode provider config.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          fileKey: { type: "string", description: "File key (defaults to the selection's / most recently pulled file)" },
-          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids to describe (defaults to the current selection)" },
-        },
-      },
-    },
-    {
-      name: "apply_frame_names",
-      description:
-        "Apply frame renames in Figma: {renames: [{id, name}]} — pass the suggestions from suggest_frame_names. The whole batch executes as one Figma undo step (Cmd+Z). The stored design is patched to match, so get_outline/get_file immediately reflect the new names. Requires the plugin connected.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          renames: { type: "array", items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" } } }, description: "Renamed nodes — [{id, name}]" },
-          fileKey: { type: "string", description: "File key (defaults to the most recently pulled file)" },
-        },
-        required: ["renames"],
-      },
-    },
   ],
 }));
 
 // ---------------------------------------------------------------------------
-// Round 13 — shared vision-rename pipeline.
-// One implementation used by BOTH surfaces: the suggest_frame_names MCP
-// tool (dry-run) and the one-click "Rename Selected" panel button
-// (POST /api/rename/selected, which also applies).
+// Round 13 — vision-rename pipeline, powering the one-click "Rename
+// Selected" panel button (POST /api/rename/selected). Round 16 removed the
+// MCP rename tools — the button is the only surface.
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve the frames a vision tool (rename or describe) should work on:
+ * Resolve the frames a tool should work on (the renamer, prepare_build):
  * explicit frameIds from the store, or — by default — the current Figma
  * selection, live-pulled and stored. Shared so every scope behaves the
  * same way. Returns an error string when nothing usable is in scope.
@@ -1464,49 +1391,33 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "list_figma_frames") {
     return { content: [{ type: "text", text: JSON.stringify(listAllFrames(), null, 2) }] };
   }
-  if (request.params.name === "get_figma_frame") {
-    const id = String((request.params.arguments as any)?.id ?? "");
-    const frame = readFrame(id);
-    if (frame === null) {
-      return { content: [{ type: "text", text: `Frame ${id} not received yet. Send it from the Figma plugin.` }] };
-    }
-    return { content: [{ type: "text", text: JSON.stringify(frame) }] };
-  }
-  if (request.params.name === "get_latest_figma_frame") {
-    const all = listAllFrames();
-    if (!all.length) {
-      return { content: [{ type: "text", text: "No frame received yet. Trigger export from the Figma plugin." }] };
-    }
-    return { content: [{ type: "text", text: JSON.stringify(readFrame(all[0].id)) }] };
-  }
-  if (request.params.name === "request_from_figma") {
+  if (request.params.name === "prepare_build") {
+    // Round 16 — the build kit: one call, the whole picture needed to
+    // start building. Structure + text (outline) and layout intent
+    // (flexbox translation) for the current selection (or stored frames).
+    // The agent's follow-ups: get_nodes for paint detail, get_images for
+    // assets.
     const args = (request.params.arguments as any) ?? {};
-    if (!createCommand(String(args.type ?? ""), args)) {
-      return {
-        content: [{ type: "text", text: "Invalid request — need {type:'page-index'|'selection'} or {type:'frame', id:'…'} or {type:'export', ids:[…]}" }],
-      };
-    }
     try {
-      const result = await runCommand(String(args.type ?? ""), args);
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Command failed: ${(e as Error).message}` }] };
-    }
-  }
-  // --- Round 8: parity-grade tools (REST-shaped returns) ---------------
-  if (request.params.name === "get_file") {
-    const args = (request.params.arguments as any) ?? {};
-    const key = String(args.fileKey ?? defaultFileKey() ?? "");
-    const pages = getPages(key);
-    if (!pages) {
+      const { frames, key, error } = await resolveToolFrames(args);
+      if (error) {
+        return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
+      }
+      const outline = buildOutline(frames, {});
+      const flex = buildFlexLayout(frames, {});
       return {
-        content: [{ type: "text", text: `file ${key || "(none)"} not found — no pages stored. Pull first: request_from_figma {type:'page-index'}, then get_file again.` }],
+        content: [{
+          type: "text",
+          text:
+            `fileKey: ${key} · ${frames.length} frame(s) · BUILD KIT — structure + text + layout intent\n\n` +
+            `=== OUTLINE — structure & text ===\n\n${outline}\n\n` +
+            `=== FLEX LAYOUT — intent as CSS ===\n\n${flex}\n\n` +
+            `Next: get_nodes on ids for fills/effects/radii/fonts, get_images for assets.`,
+        }],
       };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
-    const ids = Array.isArray(args.ids) ? args.ids.map(String) : undefined;
-    const depth = typeof args.depth === "number" ? args.depth : undefined;
-    const frames = listFramesForFile(key, ids);
-    return { content: [{ type: "text", text: JSON.stringify(buildFileEnvelope(pages, frames, { ids, depth })) }] };
   }
   if (request.params.name === "get_nodes") {
     const args = (request.params.arguments as any) ?? {};
@@ -1550,7 +1461,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const frames = listFramesForFile(key);
     if (!frames.length) {
       return {
-        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — select the frames in Figma and call prepare_build (or pass frameIds)` }],
         isError: true,
       };
     }
@@ -1574,7 +1485,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!frames.length) {
         return { content: [{ type: "text", text: "Error: nothing is selected in Figma." }], isError: true };
       }
-      // store the picked subtrees so follow-up get_nodes/get_file see them
+      // store the picked subtrees so follow-up get_nodes sees them
       for (const f of frames) {
         if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
       }
@@ -1594,7 +1505,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const frames = listFramesForFile(key);
     if (!frames.length) {
       return {
-        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+        content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — select the frames in Figma and call prepare_build (or pass frameIds)` }],
         isError: true,
       };
     }
@@ -1623,7 +1534,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       const frames = frameIds.length ? await resolveFramesForIds(key, frameIds) : listFramesForFile(key);
       if (!frames.length) {
         return {
-          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — select the frames in Figma and call prepare_build (or pass frameIds)` }],
           isError: true,
         };
       }
@@ -1646,117 +1557,12 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       const frames = frameIds.length ? await resolveFramesForIds(key, frameIds) : listFramesForFile(key);
       if (!frames.length) {
         return {
-          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+          content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — select the frames in Figma and call prepare_build (or pass frameIds)` }],
           isError: true,
         };
       }
       const digest = buildFlexLayout(frames, { maxNodes });
       return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${digest}` }] };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
-    }
-  }
-  if (request.params.name === "suggest_frame_names") {
-    const args = (request.params.arguments as any) ?? {};
-    const cfg = resolveVisionConfig();
-    if (!cfg) {
-      return {
-        content: [{
-          type: "text",
-          text: "no vision endpoint configured — set VISION_BASE_URL + VISION_MODEL + VISION_API_KEY (any OpenAI-compatible endpoint), or configure a provider in ~/.config/opencode/opencode.json",
-        }],
-      };
-    }
-    try {
-      const { frames, key, error } = await resolveToolFrames(args);
-      if (error) {
-        return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
-      }
-
-      const { suggestions, withNames, renderError } = await suggestRenamesForFrames(cfg, frames, key);
-      if (renderError) {
-        return { content: [{ type: "text", text: `Error: ${renderError}` }], isError: true };
-      }
-      if (!suggestions.length) {
-        return { content: [{ type: "text", text: "nothing to rename — every frame in scope already has a deliberate name (only default names like \"Frame 336\" are candidates)" }] };
-      }
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify(
-            { fileKey: key, model: cfg.model, source: cfg.source, dryRun: true, count: withNames, suggestions },
-            null,
-            2,
-          ),
-        }],
-      };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
-    }
-  }
-  if (request.params.name === "describe_frames") {
-    // Round 14 — the agent's eyes: render the frames, send PNG + main
-    // layer facts to the vision model, and return a markdown description
-    // of the VISUAL structure with inline layer-id references that join
-    // with get_outline.
-    const args = (request.params.arguments as any) ?? {};
-    const cfg = resolveVisionConfig();
-    if (!cfg) {
-      return {
-        content: [{
-          type: "text",
-          text: "no vision endpoint configured — set VISION_BASE_URL + VISION_MODEL + VISION_API_KEY (any OpenAI-compatible endpoint), or configure a provider in ~/.config/opencode/opencode.json",
-        }],
-        isError: true,
-      };
-    }
-    try {
-      const { frames, key, error } = await resolveToolFrames(args);
-      if (error) {
-        return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
-      }
-      const parts: string[] = [];
-      for (const frame of frames) {
-        const b64 = await renderFramePng(key, frame);
-        if (!b64) {
-          return { content: [{ type: "text", text: `Error: could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` }], isError: true };
-        }
-        const facts = collectStructuralFacts(frame.document);
-        const description = await describeFrame(cfg, b64, facts, fetch, VISION_LOG);
-        const bb = (frame.document as any)?.absoluteBoundingBox;
-        parts.push(
-          `## ${frame.name} (${frame.id}) — ${Math.round(bb?.width ?? 0)}x${Math.round(bb?.height ?? 0)}\n\n${description}`,
-        );
-      }
-      return {
-        content: [{ type: "text", text: `fileKey: ${key} · model: ${cfg.model}\n\n${parts.join("\n\n---\n\n")}` }],
-      };
-    } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
-    }
-  }
-  if (request.params.name === "apply_frame_names") {
-    const args = (request.params.arguments as any) ?? {};
-    const renames = (Array.isArray(args.renames) ? args.renames : [])
-      .map((r: any) => ({ id: String(r?.id ?? ""), name: sanitizeName(r?.name) }))
-      .filter((r: { id: string; name: string }) => r.id && r.name);
-    if (!renames.length) {
-      return { content: [{ type: "text", text: "Error: renames is required — [{id, name}], e.g. the suggestions from suggest_frame_names" }], isError: true };
-    }
-    if (!pluginConnected() && httpPortOwned) {
-      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }], isError: true };
-    }
-    try {
-      const key = String(args.fileKey ?? defaultFileKey() ?? "");
-      const result = await runCommand("rename", { renames });
-      const applied: Array<{ id: string; name: string }> = Array.isArray(result?.applied) ? result.applied : [];
-      const patched = patchStoredNames(key, applied);
-      return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({ applied, notFound: result?.notFound ?? [], storePatched: patched }, null, 2),
-        }],
-      };
     } catch (e) {
       return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
