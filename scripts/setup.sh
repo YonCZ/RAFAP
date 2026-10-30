@@ -29,9 +29,9 @@ say "Typechecking (bridge + plugin)…"
 npm run check --silent
 ok "Types clean"
 
-say "Building the Figma plugin (dist/plugin/)…"
+say "Building the Figma plugin…"
 npm run build:plugin --silent
-ok "Plugin built → dist/plugin/manifest.json"
+ok "Plugin built → plugin/code.js"
 
 cat <<EOF
 
@@ -42,7 +42,7 @@ $(printf '\033[1mNext steps\033[0m')
 
 2. In the Figma desktop app, import the plugin once:
        Plugins → Development → Import plugin from manifest…
-       → $ROOT/dist/plugin/manifest.json
+       → $ROOT/plugin/manifest.json
 
 3. Open the plugin in your file:
        Plugins → Development → Figma Agent

@@ -4,7 +4,7 @@ store/
 golden/
 .spec/
 .DS_Store
-dist/
+plugin/code.js
 docs/golden-diff-report.md
 report.md
 agent.md

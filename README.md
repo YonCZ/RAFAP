@@ -39,12 +39,12 @@ Or step by step:
 ```bash
 npm install
 npm run check          # typecheck bridge + plugin
-npm run build:plugin   # bundle the plugin to dist/plugin/
+npm run build:plugin   # bundle the plugin to plugin/code.js
 npm start              # bridge on http://127.0.0.1:3002
 ```
 
 Then in Figma: **Plugins → Development → Import plugin from manifest…** and
-select `dist/plugin/manifest.json`. Open the plugin (keep its panel open —
+select `plugin/manifest.json`. Open the plugin (keep its panel open —
 it is the bridge's connection to Figma), and:
 
 ```bash
@@ -238,7 +238,7 @@ plugin-API limits. See `report.md` and `docs/rest-parity-deviations.md`.
 ```bash
 npm run check    # tsc for bridge + plugin (CI runs this on every push)
 npm test         # vitest unit tests (mapping rules, metrics, harness)
-npm run build:plugin    # bundle the plugin to dist/plugin/
+npm run build:plugin    # bundle the plugin to plugin/code.js
 npm run plugin:reload  # reopen the plugin in Figma (macOS reload dance)
 ```
 

@@ -940,14 +940,16 @@ dev-plugin folder (the publish target) plus a skill symlink in
 `~/.config/opencode/skills/`. Now everything is one folder,
 `Projects/FigmaAgent/` — the repo root itself:
 
-- **Plugin in-repo**: Figma imports the manifest from
-  `dist/plugin/manifest.json` (built by `npm run build:plugin` —
-  esbuild was already a devDependency and the script already existed
-  from Round 9; only the sibling-copy `publish` flow was legacy).
-  `publish` is now an alias for build + reload hint. The sibling
+- **Plugin in-repo**: `npm run build:plugin` bundles
+  `plugin/code.ts → plugin/code.js` in place, so `plugin/` is fully
+  self-contained (manifest + source + build) and Figma imports
+  `plugin/manifest.json` directly. First cut of this round built to
+  `dist/plugin/` — a user importing `plugin/manifest.json` (the
+  natural instinct) hit `ENOENT: plugin/code.js`; building in place
+  removed the trap entirely. `plugin/code.js` is gitignored;
+  `publish` is now an alias for build + reload hint; `plugin:reload`
+  (menu navigation by plugin *name*) works unchanged. The sibling
   `Figma Agent/` folder is retired (deleted after re-import).
-  `dist/` is gitignored; `plugin:reload` (menu navigation by plugin
-  *name*) works unchanged.
 - **Skill by config, not symlink**: the user's `opencode.json` gets a
   `skills: ["<repo>/skills"]` entry instead of a symlink into
   `~/.config/opencode/skills` (the symlink remains the README option
@@ -965,7 +967,7 @@ dev-plugin folder (the publish target) plus a skill symlink in
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.
-2. Plugin edits only in `figma-bridge/plugin/`; ship via human-approved `npm run publish`; human reopens the plugin.
+2. Plugin edits only in `plugin/`; ship via human-approved `npm run build:plugin`; human reopens the plugin.
 3. `npm run check` green after every change (both tsconfigs).
 4. Every new mapping rule gets a vitest case in `tests/rest-mapping.test.ts`.
 5. Every intentional difference gets a `docs/rest-parity-deviations.md` entry; anything in a golden diff that is **not** in that doc is a bug.

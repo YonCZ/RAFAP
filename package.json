@@ -9,10 +9,10 @@
     "setup": "bash scripts/setup.sh",
     "plugin:reload": "bash scripts/restart-plugin.sh",
     "check": "tsc -p tsconfig.json && tsc -p plugin/tsconfig.json",
-    "build:plugin": "esbuild plugin/code.ts --bundle --format=iife --outfile=dist/plugin/code.js && cp plugin/ui.html plugin/manifest.json dist/plugin/",
+    "build:plugin": "esbuild plugin/code.ts --bundle --format=iife --outfile=plugin/code.js",
     "test": "vitest run",
     "golden-diff": "tsx tools/golden-diff.ts",
-    "publish": "npm run build:plugin && echo 'built dist/plugin \u2014 reopen the plugin in Figma (npm run plugin:reload)'"
+    "publish": "npm run build:plugin && echo 'built plugin/code.js \u2014 reopen the plugin in Figma (npm run plugin:reload)'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
