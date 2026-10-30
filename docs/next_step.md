@@ -1018,6 +1018,46 @@ the fix, verified after: full 131-name dry-run succeeds.
 
 ---
 
+## Round 14 — give agents eyes: `describe_frames` + error semantics
+
+Field report from an agent building a Board Screen: it never rendered
+the design, reconstructed the layout from bounding-box arithmetic
+("377+18+650+18+377 = 1440"), invented a responsive ratio-scaling
+theory the design does not support, and burned 4+ minutes digesting a
+`get_nodes depth=4` payload (the outline-first discipline exists but
+skills are advisory — the agent's session never loaded it).
+
+- **`describe_frames` MCP tool** — renders the frames, sends PNG + main
+  structural layer facts (id/name/type/size/text, depth ≤ 2, ≤ 60
+  facts) to the vision model, and returns a markdown description of
+  the VISUAL structure with inline layer-id references that join
+  `get_outline`. Grounded: the prompt forbids inventing behavior
+  (responsiveness/scaling) that is not drawn. New `lib/vision-describe.ts`
+  (collectStructuralFacts + describeFrame), sharing the renamer's
+  config/retry/logging (logged as `op:"describe"` in the same JSONL).
+- **Shared plumbing**: `resolveToolFrames` (frameIds-vs-selection scope
+  for all vision tools), `renderFramePng` (smart-scale render),
+  `computeRenderScale` extracted to lib; suggest_frame_names refactored
+  onto them.
+- **`isError: true` on all 19 MCP error returns** — field report: a
+  failed lookup returned "Error: node 76:657 not found…" as a normal
+  text result; the agent indexed `.nodes` on the string and crashed
+  with a cryptic TypeError far from the cause. Flagged errors now
+  surface as real errors carrying the actionable message.
+- **Tool description nudges** (always in context, unlike skills):
+  `get_nodes` now says to prefer `get_outline` for structural
+  exploration and `describe_frames` for visual understanding.
+- **Skill updated**: workflow step 4 "See it — describe_frames"; the
+  "outline IS your eyes" rule becomes "outline for structure,
+  describe_frames for sight".
+
+8 new vitest cases (facts collection, prompt content, reasoning
+fallback, retry, log key-exclusion); 177 total. Live-verified on the
+Board Screen frame 101:1543 — described sidebar/board/end-turn layout
+correctly, no invented scaling.
+
+---
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

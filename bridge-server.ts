@@ -48,12 +48,14 @@ import { searchNodes } from "./lib/search.js";
 import { buildOutline } from "./lib/outline.js";
 import {
   collectRenameTargets,
+  computeRenderScale,
   resolveVisionConfig,
   sanitizeName,
   suggestNames,
   suggestionsToRenames,
   type VisionConfig,
 } from "./lib/vision-rename.js";
+import { collectStructuralFacts, describeFrame } from "./lib/vision-describe.js";
 import { mergeFontProbeResult, parseFontMetricsTable, rewriteFontMetrics, type FontMetricsTable } from "./lib/font-metrics.js";
 import {
   applyTransitionTable,
@@ -1203,7 +1205,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_nodes",
       description:
-        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file. Caution: depth prunes children — a frame that looks empty at low depth may just be pruned; use get_outline when you need the whole picture.",
+        "GET /v1/files/:key/nodes?ids= — REST-shaped subtrees by node id, nested under nodes[id].document. Unstored ids are live-pulled from the plugin when connected. Defaults to the most recently pulled file. Prefer get_outline for structural exploration (a compact digest of the whole tree) and describe_frames for what the design visually looks like — get_nodes returns full REST payloads that can be very large. Caution: depth prunes children — a frame that looks empty at low depth may just be pruned; use get_outline when you need the whole picture.",
       inputSchema: {
         type: "object",
         properties: {
@@ -1286,6 +1288,18 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "describe_frames",
+      description:
+        "What the design actually LOOKS like: renders the frames and asks a vision model to describe the visual structure — layout regions and their roles, visual hierarchy, grouping, alignment, spacing — as markdown that references layer ids (joins with get_outline). Use when building or reproducing a design, or when the numbers alone do not explain the layout. Scope defaults to the current Figma selection; pass frameIds to target stored frames. Vision endpoint from VISION_BASE_URL/VISION_MODEL/VISION_API_KEY env vars or the user's OpenCode provider config.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          fileKey: { type: "string", description: "File key (defaults to the selection's / most recently pulled file)" },
+          frameIds: { type: "array", items: { type: "string" }, description: "Figma frame ids to describe (defaults to the current selection)" },
+        },
+      },
+    },
+    {
       name: "apply_frame_names",
       description:
         "Apply frame renames in Figma: {renames: [{id, name}]} — pass the suggestions from suggest_frame_names. The whole batch executes as one Figma undo step (Cmd+Z). The stored design is patched to match, so get_outline/get_file immediately reflect the new names. Requires the plugin connected.",
@@ -1309,6 +1323,51 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the frames a vision tool (rename or describe) should work on:
+ * explicit frameIds from the store, or — by default — the current Figma
+ * selection, live-pulled and stored. Shared so every scope behaves the
+ * same way. Returns an error string when nothing usable is in scope.
+ */
+async function resolveToolFrames(
+  args: any,
+): Promise<{ frames: StoredFrame[]; key: string; error?: string }> {
+  const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
+  if (frameIds.length) {
+    const key = String(args.fileKey ?? defaultFileKey() ?? "");
+    try {
+      return { frames: await resolveFramesForIds(key, frameIds), key };
+    } catch (e) {
+      return { frames: [], key, error: (e as Error).message };
+    }
+  }
+  if (!pluginConnected() && httpPortOwned) {
+    return { frames: [], key: "", error: "the Figma plugin is not connected — open the Figma Agent panel in Figma, or pass frameIds." };
+  }
+  const picked = await runCommand("selection", {});
+  const frames = (Array.isArray(picked) ? picked : []) as StoredFrame[];
+  if (!frames.length) {
+    return { frames: [], key: "", error: "nothing is selected in Figma — select frames, or pass frameIds." };
+  }
+  for (const f of frames) {
+    if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
+  }
+  return { frames, key: String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? "") };
+}
+
+/**
+ * Render a stored frame to a base64 PNG at the smart vision scale.
+ * Returns null when the render fails (plugin offline etc.).
+ */
+async function renderFramePng(key: string, frame: StoredFrame): Promise<string | null> {
+  const bb = (frame.document as any)?.absoluteBoundingBox;
+  const scale = computeRenderScale(Number(bb?.width) || 0, Number(bb?.height) || 0);
+  const images = await exportImagesForKey(key, [frame.id], "png", scale);
+  const asset = assetPath(key, frame.id, "png");
+  if (!images[frame.id] || !fs.existsSync(asset)) return null;
+  return fs.readFileSync(asset).toString("base64");
+}
+
+/**
  * Collect lazy-name targets inside the given frames, render each frame
  * (smart-scaled so vision endpoints accept it), and ask the vision model
  * for names. Returns per-target suggestions (suggestedName null when the
@@ -1324,16 +1383,10 @@ async function suggestRenamesForFrames(
   for (const frame of frames) {
     const targets = collectRenameTargets(frame.document);
     if (!targets.length) continue;
-    // Vision endpoints reject tiny images — render so min(dim) ≥ 512px.
-    const bb = (frame.document as any)?.absoluteBoundingBox;
-    const minDim = Math.min(Number(bb?.width) || 0, Number(bb?.height) || 0) || 512;
-    const scale = Math.max(1, Math.min(4, Math.ceil(512 / minDim)));
-    const images = await exportImagesForKey(key, [frame.id], "png", scale);
-    const asset = assetPath(key, frame.id, "png");
-    if (!images[frame.id] || !fs.existsSync(asset)) {
+    const b64 = await renderFramePng(key, frame);
+    if (!b64) {
       return { suggestions: [], withNames: 0, renderError: `could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` };
     }
-    const b64 = fs.readFileSync(asset).toString("base64");
     const names = await suggestNames(cfg, b64, targets, fetch, VISION_LOG);
     for (const t of targets) {
       const suggestedName = names[t.id] ?? null;
@@ -1446,7 +1499,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     const args = (request.params.arguments as any) ?? {};
     const ids = Array.isArray(args.ids) ? args.ids.map(String) : [];
     if (!ids.length) {
-      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }] };
+      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }], isError: true };
     }
     const key = String(args.fileKey ?? defaultFileKey() ?? "");
     const depth = typeof args.depth === "number" ? args.depth : undefined;
@@ -1460,18 +1513,18 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   if (request.params.name === "get_images") {
     const args = (request.params.arguments as any) ?? {};
     const ids = Array.isArray(args.ids) ? args.ids.map(String) : [];
     if (!ids.length) {
-      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }] };
+      return { content: [{ type: "text", text: "Error: ids is required (array of Figma node ids)" }], isError: true };
     }
     const format = String(args.format ?? "png").toLowerCase();
     if (!CONTENT_TYPES[format]) {
-      return { content: [{ type: "text", text: `Error: format must be one of ${Object.keys(CONTENT_TYPES).join(", ")}` }] };
+      return { content: [{ type: "text", text: `Error: format must be one of ${Object.keys(CONTENT_TYPES).join(", ")}` }], isError: true };
     }
     const scale = Number(args.scale ?? 2);
     const key = String(args.fileKey ?? defaultFileKey() ?? "");
@@ -1485,6 +1538,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!frames.length) {
       return {
         content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+        isError: true,
       };
     }
     const components: Record<string, unknown> = {};
@@ -1499,13 +1553,13 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
   if (request.params.name === "get_selection") {
     if (!pluginConnected() && httpPortOwned) {
-      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }] };
+      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }], isError: true };
     }
     try {
       const picked = await runCommand("selection", {});
       const frames = Array.isArray(picked) ? picked : [];
       if (!frames.length) {
-        return { content: [{ type: "text", text: "Error: nothing is selected in Figma." }] };
+        return { content: [{ type: "text", text: "Error: nothing is selected in Figma." }], isError: true };
       }
       // store the picked subtrees so follow-up get_nodes/get_file see them
       for (const f of frames) {
@@ -1518,7 +1572,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   if (request.params.name === "search_nodes") {
@@ -1528,6 +1582,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (!frames.length) {
       return {
         content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+        isError: true,
       };
     }
     try {
@@ -1543,7 +1598,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   if (request.params.name === "get_outline") {
@@ -1556,12 +1611,13 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (!frames.length) {
         return {
           content: [{ type: "text", text: `no stored frames for ${key || "(any file)"} — pull first: request_from_figma {type:'page-index'}` }],
+          isError: true,
         };
       }
       const outline = buildOutline(frames, { maxNodes });
       return { content: [{ type: "text", text: `fileKey: ${key} · ${frames.length} frame(s)\n\n${outline}` }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   if (request.params.name === "suggest_frame_names") {
@@ -1576,30 +1632,14 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
     try {
-      const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
-      let frames: StoredFrame[];
-      let key: string;
-      if (frameIds.length) {
-        key = String(args.fileKey ?? defaultFileKey() ?? "");
-        frames = await resolveFramesForIds(key, frameIds);
-      } else {
-        if (!pluginConnected() && httpPortOwned) {
-          return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma, or pass frameIds." }] };
-        }
-        const picked = await runCommand("selection", {});
-        frames = (Array.isArray(picked) ? picked : []) as StoredFrame[];
-        if (!frames.length) {
-          return { content: [{ type: "text", text: "Error: nothing is selected in Figma — select the frames to rename, or pass frameIds." }] };
-        }
-        for (const f of frames) {
-          if (f?.id) persistResult({ type: "frame", id: "" } as AgentCommand, f);
-        }
-        key = String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? "");
+      const { frames, key, error } = await resolveToolFrames(args);
+      if (error) {
+        return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
       }
 
       const { suggestions, withNames, renderError } = await suggestRenamesForFrames(cfg, frames, key);
       if (renderError) {
-        return { content: [{ type: "text", text: `Error: ${renderError}` }] };
+        return { content: [{ type: "text", text: `Error: ${renderError}` }], isError: true };
       }
       if (!suggestions.length) {
         return { content: [{ type: "text", text: "nothing to rename — every frame in scope already has a deliberate name (only default names like \"Frame 336\" are candidates)" }] };
@@ -1615,7 +1655,48 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
+    }
+  }
+  if (request.params.name === "describe_frames") {
+    // Round 14 — the agent's eyes: render the frames, send PNG + main
+    // layer facts to the vision model, and return a markdown description
+    // of the VISUAL structure with inline layer-id references that join
+    // with get_outline.
+    const args = (request.params.arguments as any) ?? {};
+    const cfg = resolveVisionConfig();
+    if (!cfg) {
+      return {
+        content: [{
+          type: "text",
+          text: "no vision endpoint configured — set VISION_BASE_URL + VISION_MODEL + VISION_API_KEY (any OpenAI-compatible endpoint), or configure a provider in ~/.config/opencode/opencode.json",
+        }],
+        isError: true,
+      };
+    }
+    try {
+      const { frames, key, error } = await resolveToolFrames(args);
+      if (error) {
+        return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
+      }
+      const parts: string[] = [];
+      for (const frame of frames) {
+        const b64 = await renderFramePng(key, frame);
+        if (!b64) {
+          return { content: [{ type: "text", text: `Error: could not render frame ${frame.id} ("${frame.name}") — is the plugin connected?` }], isError: true };
+        }
+        const facts = collectStructuralFacts(frame.document);
+        const description = await describeFrame(cfg, b64, facts, fetch, VISION_LOG);
+        const bb = (frame.document as any)?.absoluteBoundingBox;
+        parts.push(
+          `## ${frame.name} (${frame.id}) — ${Math.round(bb?.width ?? 0)}x${Math.round(bb?.height ?? 0)}\n\n${description}`,
+        );
+      }
+      return {
+        content: [{ type: "text", text: `fileKey: ${key} · model: ${cfg.model}\n\n${parts.join("\n\n---\n\n")}` }],
+      };
+    } catch (e) {
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   if (request.params.name === "apply_frame_names") {
@@ -1624,10 +1705,10 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       .map((r: any) => ({ id: String(r?.id ?? ""), name: sanitizeName(r?.name) }))
       .filter((r: { id: string; name: string }) => r.id && r.name);
     if (!renames.length) {
-      return { content: [{ type: "text", text: "Error: renames is required — [{id, name}], e.g. the suggestions from suggest_frame_names" }] };
+      return { content: [{ type: "text", text: "Error: renames is required — [{id, name}], e.g. the suggestions from suggest_frame_names" }], isError: true };
     }
     if (!pluginConnected() && httpPortOwned) {
-      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }] };
+      return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }], isError: true };
     }
     try {
       const key = String(args.fileKey ?? defaultFileKey() ?? "");
@@ -1641,7 +1722,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         }],
       };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }] };
+      return { content: [{ type: "text", text: `Error: ${(e as Error).message}` }], isError: true };
     }
   }
   throw new Error("Tool not found");

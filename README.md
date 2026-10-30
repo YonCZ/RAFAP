@@ -120,6 +120,7 @@ MCP client and the design is directly tool-accessible, no HTTP needed:
 | `get_outline` | — | Compact whole-tree digest: one line per node (id/name/type/size, child count, auto-layout, **all text content**), no paint JSON, no depth pruning. The *understanding* view — `get_file` of the same file is ~17× larger |
 | `suggest_frame_names` | — | Dry-run AI renaming of lazy frame names (`Frame 336` → `Top Nav`): renders the selection, sends PNG + layer facts to a vision LLM, returns proposals |
 | `apply_frame_names` | write | Applies `[{id, name}]` renames in Figma (one undo step) and patches the stored design so `get_outline` reflects them immediately |
+| `describe_frames` | — | The agent's eyes: renders the frames, asks a vision LLM to describe the visual structure (regions, hierarchy, grouping, spacing) as markdown with layer-id references that join `get_outline`. Use before building/reproducing a design |
 | `request_from_figma` | command queue | Fresh pulls on demand (`page-index`, `frame`, `selection`, `export`) |
 
 The older agent-shaped tools (`list_figma_frames`, `get_figma_frame`,
@@ -173,6 +174,15 @@ nodes are untouchable.
 agent: select frames in Figma, click **Rename Selected** in the plugin
 panel. It suggests via the vision model and applies immediately
 (`POST /api/rename/selected`); one ⌘Z reverts the whole batch.
+
+**Seeing the design (`describe_frames`)** — the same render→vision
+machinery answers a different question: not "what are these layers
+called" but "what does this look like". It returns a markdown
+description of the visual structure — regions and their roles, visual
+hierarchy, grouping, spacing — referencing layer ids, so it joins with
+`get_outline`. Non-multimodal agents use it before building to avoid
+reconstructing the layout from bounding-box arithmetic (and inventing
+theories the design does not support).
 
 The vision endpoint is any OpenAI-compatible chat-completions API:
 

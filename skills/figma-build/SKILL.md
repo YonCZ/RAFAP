@@ -22,12 +22,19 @@ frame is empty — depth-pruned children look exactly like emptiness.
 3. **Extract intent from the text nodes.** Button labels, headings, placeholder
    copy — they tell you what each region is *for*. Frame names + text content
    are the design's documentation.
-4. **Only then, targeted detail** — `figma.get_nodes` with explicit ids (small
+4. **See it — `figma.describe_frames`.** The outline gives you the structure;
+   this gives you the *visual* understanding: regions and their roles, visual
+   hierarchy, what dominates, grouping, spacing — a vision model describing
+   the rendered frame in markdown with layer-id references. Call it on the
+   frames you are about to build before writing code: it prevents
+   plausible-sounding but wrong layout theories (e.g. inventing responsive
+   scaling that is not in the design). Numbers alone are not seeing.
+5. **Only then, targeted detail** — `figma.get_nodes` with explicit ids (small
    `depth` is fine now, because you already know the structure) for exact
    fills, radii, strokes; `figma.get_metadata` for components and styles;
    `figma.search_nodes` to find nodes by text when hunting something specific.
-5. **Build.** Map frames to components/routes using the understanding from
-   step 2–3, not assumptions.
+6. **Build.** Map frames to components/routes using the understanding from
+   steps 2–4, not assumptions.
 
 ## Hard rules
 
@@ -38,9 +45,14 @@ frame is empty — depth-pruned children look exactly like emptiness.
   no "I'll check the rest later".
 - One `get_outline` call beats five depth-limited `get_nodes` calls — both in
   tokens and in correctness.
-- You are not multimodal: rendering images (`get_images`) is for saving
-  assets or giving them to the user, never for "looking" at the design. The
-  outline IS your eyes.
+- **You cannot look at images yourself** — but `figma.describe_frames` can:
+  it sends the render to a vision model and returns what the design
+  actually looks like, with layer-id references that join the outline.
+  Use it before building anything visual. `get_images` itself is still only
+  for saving assets, never for "looking".
+- Do not invent behavior that is not drawn (responsive scaling, animations,
+  states). If the description and outline leave a real ambiguity, ask the
+  user — do not guess silently.
 - If a frame's purpose is still ambiguous after the outline (no text, generic
   name), ask the user — do not guess silently. If the design is full of lazy
   default names ("Frame 336"), `figma.suggest_frame_names` can fix the naming
@@ -52,6 +64,7 @@ frame is empty — depth-pruned children look exactly like emptiness.
 | Need | Tool |
 | --- | --- |
 | Whole-design understanding | `figma.get_outline` (first, always) |
+| What the design visually looks like | `figma.describe_frames` (before building) |
 | Pages + top-level frames | `figma.request_from_figma {type:'page-index'}` |
 | Exact styling of known ids | `figma.get_nodes {ids, depth}` |
 | Components / paint & text styles | `figma.get_metadata` |
