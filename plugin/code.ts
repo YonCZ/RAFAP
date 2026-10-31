@@ -34,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "4.0.1";
+const PLUGIN_VERSION = "4.0.2";
 const MAX_NODES_PER_EXTRACTION = 20000;
 
 figma.showUI(__html__, { width: 220, height: 52 });

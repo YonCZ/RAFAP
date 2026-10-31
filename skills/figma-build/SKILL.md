@@ -52,23 +52,44 @@ verification pass — never an input.
 ## Responsive scaling (only when asked)
 
 Do not invent responsive behavior — build the design as drawn. If the
-user asks for the build to scale, use the design's own sizing modes,
-not invented breakpoints:
+user asks for the build to scale, **every FIXED value is a ratio of
+the design resolution**, not a pixel:
 
-1. Give the outer wrapper `container-type: inline-size` (container
-   queries). The design's pixel dimensions then translate against the
-   **design resolution** — the root frame's width `W` (e.g. 1200).
-2. `FIXED` sizes scale rigidly: a `120px` value in a `1200`-wide
-   design becomes `calc(100cqw * 120 / 1200)`. Do this for FIXED
-   widths, heights, gaps, paddings, radii, font sizes.
+1. Give the outer wrapper `container-type: inline-size` and let it
+   fill the container — **no `max-width` cap** (the point is that a
+   bigger monitor shows a bigger build).
+2. Take `W` = the root frame's width (e.g. 1415). Every FIXED value
+   `X` px becomes `calc(100cqw * X / W)` — widths, heights, gaps,
+   paddings, radii, font sizes, all of them. Everything scales by
+   container width, so the design keeps its exact proportions at any
+   size.
 3. `FILL` / `HUG` stay ordinary flex CSS (`flex-grow`, content
    sizing) — those are the parts the design itself says should reflow.
 4. Everything else (colors, text, effects) is untouched by scaling.
 
-The ratio base is always the design's own resolution — never a
-viewport width, never a guessed breakpoint. If the design contains
-multiple artboards at different sizes, each artboard scales against
-its own `W`.
+Apply the ratio to **all** fixed values without inventing exceptions
+— if some value should not scale, that is a follow-up instruction
+from the user, not a judgment to make silently. Never substitute
+`max-width` centering for scaling: a capped build does not grow on a
+bigger monitor, which is the opposite of what was asked. If the
+design contains multiple artboards at different sizes, each artboard
+scales against its own `W`.
+
+## Verify your translation mechanically
+
+After writing the CSS (before calling it done), walk the flex digest
+again, child note by child note, and check that **every part** of
+every note appears in the built CSS — each `w:` / `h:` sizing phrase,
+`flex-grow:`, `align-self:`, `transform:`. One dropped part is one
+wrong panel; they are easy to lose in a 50-node tree.
+
+The one that bites: **`w:stretch` (or `h:stretch`) on a child whose
+parent has `align-items: center` (or `flex-end`)** requires an
+explicit `align-self: stretch` on that child in CSS. Figma's stretch
+overrides the parent's alignment; CSS's default does not — without
+the explicit `align-self`, the child hugs its content instead of
+filling (field report: a whole panel collapsed to ~200px because of
+exactly this one missing declaration).
 
 ## Multiple selections / multiple files
 

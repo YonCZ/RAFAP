@@ -35,6 +35,12 @@
 
   <script>
     const BRIDGE = "http://localhost:3002";
+    // Round 16.3 — per-panel window id. Every long-poll carries it so the
+    // bridge can tell plugin windows apart and REMEMBER them between
+    // polls (a backgrounded Figma window's polls are throttled — without
+    // identity+memory the bridge undercounts open windows and the
+    // multi-window "which frame did you mean?" ask never fires).
+    const WID = Math.random().toString(36).slice(2, 10);
     const status = (t, cls) => {
       const el = document.getElementById("status");
       el.innerText = t.length > 60 ? t.slice(0, 59) + "…" : t;
@@ -69,7 +75,7 @@
     async function pollAgent() {
       for (;;) {
         try {
-          const res = await fetch(BRIDGE + "/api/agent/commands/pending");
+          const res = await fetch(BRIDGE + "/api/agent/commands/pending?wid=" + WID);
           const data = await res.json();
           conn("● bridge online", "on");
           if (data.command) {

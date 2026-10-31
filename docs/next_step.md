@@ -1215,6 +1215,55 @@ post-mortem found three gaps, all fixed here:
 196 tests (13 new: outline/flex rotation tokens, selection merge,
 file count, options formatting). Bridge 4.0.2, plugin 4.0.1.
 
+### Round 16.3 — window identity with memory, verification checklist, ratio recipe
+
+The user's second end-to-end test (Doomsroller Quest Menu, 388:576,
+built into FT/ with an action log) surfaced three findings:
+
+1. **The multi-window ask never fired.** Two agent instances with
+   two plugin windows (selections in both) each silently built a
+   different window's frame — no options, no question. Root cause:
+   Round 16.2's `livePollers` counted *currently held* long-polls,
+   but a backgrounded Figma window's plugin iframe is throttled
+   between poll cycles, so the instant `prepare_build` snapshotted
+   the count, the backgrounded window held no poll → count 1 →
+   single command → the frontmost window answered. Fix (plugin
+   4.0.2 + bridge 4.0.3): every plugin panel now stamps a random
+   `wid` on its polls; the bridge keeps a `wid → lastSeen` registry
+   (`lib/window-registry.ts`) and counts windows seen within the
+   last 45s — memory, not instantaneous holding. Polls without a wid
+   (stale plugins) collapse into one anonymous window, still counted.
+   The fan-out now fires selection commands **until every known
+   window has delivered at least one result** (success or error —
+   "nothing selected" is heard), capped at 12 shots / ~30s, then
+   merges and dedupes as before. Multi-file → labeled options + ask
+   (unchanged, now actually reachable). A window that stays silent
+   past the deadline does not block: the build kit carries a caveat
+   line so the agent can warn the user ("another window didn't
+   respond — name the frame if this isn't it").
+2. **One panel hugged instead of filling** (Quests card): the digest
+   said `w:stretch · align-self:stretch` but the agent dropped the
+   `align-self` — under a parent's `align-items: center`, Figma's
+   stretch overrides the alignment but CSS's default does not, so
+   the card collapsed to content width. Data was right; translation
+   slipped. Fix: the skill gained a **mechanical verification
+   section** — after writing CSS, walk every digest child note and
+   check every part appears in the build, with this exact trap
+   called out.
+3. **Responsive recipe was ignored** (the agent invented max-width
+   centering instead of the container-query recipe). Rewritten as an
+   imperative ratio rule: every FIXED value IS a ratio of the design
+   resolution (`calc(100cqw * X / W)` for widths, heights, gaps,
+   paddings, radii, fonts — everything scales by container width,
+   aspect preserved), the wrapper fills the container with **no
+   max-width cap** (bigger monitor = bigger build), FILL/HUG stay
+   flex, and no invented exceptions — special cases are follow-up
+   prompts, not silent judgments.
+
+204 tests (8 new: window registry identity/memory/hearing). Bridge
+4.0.3, plugin 4.0.2 (ui.html wid — reload the plugin in every open
+Figma window after this deploy).
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

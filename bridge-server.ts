@@ -49,6 +49,7 @@ import { searchNodes } from "./lib/search.js";
 import { buildOutline } from "./lib/outline.js";
 import { buildFlexLayout } from "./lib/flex-layout.js";
 import { formatSelectionOptions, mergeSelectionLists, selectionFileCount } from "./lib/selection-merge.js";
+import { WindowRegistry } from "./lib/window-registry.js";
 import {
   collectRenameTargets,
   computeRenderScale,
@@ -402,13 +403,13 @@ const COMMAND_TIMEOUT_MS = 20_000;
 const LONG_POLL_MS = 10_000;
 
 /**
- * Round 16.2 — how many plugin windows currently HOLD a long-poll on
- * /pending (each open Figma Agent panel holds exactly one). >1 means
- * multiple windows are racing for commands, so a single `selection`
- * command answers whichever window's poll wins — the fan-out below
- * exists to hear them all.
+ * Round 16.3 — plugin-window identity with memory (replaces Round
+ * 16.2's held-poll counter). Every plugin panel stamps a random wid on
+ * its /pending polls; this registry remembers who was seen recently,
+ * so a throttled backgrounded window (between polls) still counts.
+ * See lib/window-registry.ts.
  */
-let livePollers = 0;
+const windowRegistry = new WindowRegistry();
 
 /**
  * Follower mode: when multiple bridge processes share one store (e.g. an
@@ -541,46 +542,71 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
 }
 
 // ---------------------------------------------------------------------------
-// Round 16.2 — multi-window selection fan-out.
+// Round 16.2/16.3 — multi-window selection fan-out.
 // ---------------------------------------------------------------------------
 
 /**
  * Ask for the current selection, hearing EVERY open plugin window:
- * one window → a single command exactly as before. Multiple windows
- * (each holding a long-poll) → fire a burst of selection commands and
- * merge the answers, deduped by fileKey + frame id. When the merged
- * answers span more than one file, callers must ask which frame to
- * build instead of guessing (see formatSelectionOptions).
+ * one known window → a single command exactly as before. Multiple
+ * known windows (per the window registry's memory — a backgrounded
+ * window between throttled polls still counts) → fire selection
+ * commands until every known window has answered at least once
+ * (success or error — "nothing selected" is heard), then merge,
+ * deduped by fileKey + frame id. When the merged answers span more
+ * than one file, callers must ask which frame to build instead of
+ * guessing (see formatSelectionOptions).
  */
-async function collectSelections(): Promise<{ frames: StoredFrame[]; windows: number }> {
-  const windows = Math.max(1, livePollers);
+async function collectSelections(): Promise<{
+  frames: StoredFrame[];
+  windows: number;
+  unheardCount?: number;
+}> {
+  const windows = Math.max(1, windowRegistry.activeCount());
   if (windows <= 1) {
     const picked = await runCommand("selection", {});
     return { frames: (Array.isArray(picked) ? picked : []) as StoredFrame[], windows: 1 };
   }
   // Which window answers a single command is a coin flip (whichever
-  // long-poll wins the race) — fire enough commands that every window
-  // answers at least once, then merge. Failures (a window deselected,
-  // a mid-poll reload) are tolerated: any answer improves the picture.
-  const shots = Math.max(4, 2 * windows + 2);
-  const settled = await Promise.allSettled(
-    Array.from({ length: shots }, () => runCommand("selection", {}, 15_000)),
-  );
-  const lists = settled.flatMap((r) =>
-    r.status === "fulfilled" && Array.isArray(r.value) ? [r.value as unknown[]] : [],
-  );
+  // poll wins the race), so keep firing until every known window has
+  // delivered a result — a throttled backgrounded window may need
+  // several volleys to take its turn. Bounded by shots + deadline.
+  const deadline = Date.now() + 30_000;
+  const maxShots = 12;
+  const lists: unknown[][] = [];
+  let shots = 0;
+  while (shots < maxShots) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 2_000) break;
+    if (windowRegistry.unheard().length === 0) break; // every window heard
+    const volley = Math.min(3, maxShots - shots);
+    const per = Math.max(5_000, Math.min(20_000, remaining));
+    const settled = await Promise.allSettled(
+      Array.from({ length: volley }, () => runCommand("selection", {}, per)),
+    );
+    shots += volley;
+    for (const r of settled) {
+      if (r.status === "fulfilled" && Array.isArray(r.value)) lists.push(r.value);
+    }
+  }
+  const unheardCount = windowRegistry.unheard().length;
   const frames = mergeSelectionLists<StoredFrame>(lists);
-  log(`[bridge] selection fan-out: ${windows} window(s), ${shots} shots, ${frames.length} unique frame(s)`);
-  return { frames, windows };
+  log(
+    `[bridge] selection fan-out: ${windows} window(s), ${shots} shots, ${frames.length} unique frame(s), ${unheardCount} unheard`,
+  );
+  return { frames, windows, ...(unheardCount ? { unheardCount } : {}) };
 }
 
 /**
  * collectSelections for whichever bridge process is serving the caller:
- * the poller count only exists on the port owner (only it serves
+ * the window registry only exists on the port owner (only it serves
  * /pending), so followers delegate the whole fan-out over localhost
  * and fall back to a plain single selection when the owner is down.
  */
-async function gatherSelection(): Promise<{ frames: StoredFrame[]; windows: number }> {
+async function gatherSelection(): Promise<{
+  frames: StoredFrame[];
+  windows: number;
+  unheardCount?: number;
+}> {
   if (!httpPortOwned) {
     try {
       const res = await fetch(`${BASE}/api/agent/selections`, {
@@ -777,25 +803,19 @@ app.post("/api/agent/commands", (req, res) => {
 });
 
 /** Plugin long-polls here — held up to 10s until a command arrives.
- *  Each held poll registers a live poller (one per open plugin window). */
-app.get("/api/agent/commands/pending", async (_req, res) => {
+ *  Each poll touches the window registry (`?wid=` names the window; a
+ *  missing wid counts as one anonymous window — pre-16.3 plugins). */
+app.get("/api/agent/commands/pending", async (req, res) => {
   lastPluginSeen = Date.now();
-  livePollers++;
-  let released = false;
-  const release = () => {
-    if (!released) {
-      released = true;
-      livePollers = Math.max(0, livePollers - 1);
-    }
-  };
-  res.on("close", release);
-  res.on("finish", release);
+  windowRegistry.touch(String(req.query.wid ?? ""));
+  windowRegistry.prune();
   const deadline = Date.now() + LONG_POLL_MS;
   for (;;) {
     sweepStale();
     const next = [...commands.values()].find((c) => c.status === "pending");
     if (next) {
       next.status = "delivered";
+      windowRegistry.deliveredTo(next.id, String(req.query.wid ?? ""));
       res.json({ command: next });
       return;
     }
@@ -844,6 +864,7 @@ app.post("/api/agent/commands/:id/result", (req, res) => {
     res.status(404).json({ error: "unknown command" });
     return;
   }
+  windowRegistry.heardResult(req.params.id); // Round 16.3 — this window answered
   if (req.body?.error) {
     cmd.status = "error";
     cmd.error = String(req.body.error);
@@ -1245,7 +1266,7 @@ export { app, server };
 // Optional MCP tools (stdio) — registered when spawned by an MCP client.
 // ---------------------------------------------------------------------------
 
-const mcpServer = new Server({ name: "figma-agent-bridge", version: "4.0.2" }, { capabilities: { tools: {} } });
+const mcpServer = new Server({ name: "figma-agent-bridge", version: "4.0.3" }, { capabilities: { tools: {} } });
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
@@ -1368,7 +1389,7 @@ mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
  */
 async function resolveToolFrames(
   args: any,
-): Promise<{ frames: StoredFrame[]; key: string; error?: string }> {
+): Promise<{ frames: StoredFrame[]; key: string; error?: string; note?: string }> {
   const frameIds = Array.isArray(args.frameIds) ? args.frameIds.map(String) : [];
   if (frameIds.length) {
     const key = String(args.fileKey ?? defaultFileKey() ?? "");
@@ -1381,7 +1402,7 @@ async function resolveToolFrames(
   if (!pluginConnected() && httpPortOwned) {
     return { frames: [], key: "", error: "the Figma plugin is not connected — open the Figma Agent panel in Figma, or pass frameIds." };
   }
-  const { frames } = await gatherSelection();
+  const { frames, unheardCount } = await gatherSelection();
   if (!frames.length) {
     return { frames: [], key: "", error: "nothing is selected in Figma — select frames, or pass frameIds." };
   }
@@ -1399,6 +1420,17 @@ async function resolveToolFrames(
         `selections arrived from more than one Figma file (multiple plugin windows are open). ` +
         `Ask the user which one to build, then pass its frameIds (+ fileKey):\n` +
         formatSelectionOptions(frames),
+    };
+  }
+  // Round 16.3 — a known window stayed silent (deeply throttled). Proceed
+  // with what was heard, but tell the agent so it can warn the user.
+  if (unheardCount) {
+    return {
+      frames,
+      key: String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? ""),
+      note:
+        `${unheardCount} other open Figma window(s) did not respond — if this is not the frame ` +
+        `the user meant, bring that window to the front (or build by naming the frame) and try again.`,
     };
   }
   return { frames, key: String(args.fileKey ?? frames[0]?.fileKey ?? defaultFileKey() ?? "") };
@@ -1509,7 +1541,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
     // assets.
     const args = (request.params.arguments as any) ?? {};
     try {
-      const { frames, key, error } = await resolveToolFrames(args);
+      const { frames, key, error, note } = await resolveToolFrames(args);
       if (error) {
         return { content: [{ type: "text", text: `Error: ${error}` }], isError: true };
       }
@@ -1522,7 +1554,8 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
             `fileKey: ${key} · ${frames.length} frame(s) · BUILD KIT — structure + text + layout intent\n\n` +
             `=== OUTLINE — structure & text ===\n\n${outline}\n\n` +
             `=== FLEX LAYOUT — intent as CSS ===\n\n${flex}\n\n` +
-            `Next: get_nodes on ids for fills/effects/radii/fonts, get_images for assets.`,
+            `Next: get_nodes on ids for fills/effects/radii/fonts, get_images for assets.` +
+            (note ? `\n\nNote: ${note}` : ""),
         }],
       };
     } catch (e) {
@@ -1590,7 +1623,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
       return { content: [{ type: "text", text: "Error: the Figma plugin is not connected — open the Figma Agent panel in Figma." }], isError: true };
     }
     try {
-      const { frames, windows } = await gatherSelection();
+      const { frames, windows, unheardCount } = await gatherSelection();
       if (!frames.length) {
         return { content: [{ type: "text", text: "Error: nothing is selected in Figma." }], isError: true };
       }
@@ -1612,10 +1645,14 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
+      // Round 16.3 — a known window stayed silent: proceed, but say so.
+      const caveat = unheardCount
+        ? `Note: ${unheardCount} other open Figma window(s) did not respond — if this is not the selection the user meant, bring that window to the front (or select by naming the frame).\n`
+        : "";
       return {
         content: [{
           type: "text",
-          text: JSON.stringify(buildNodesResponse(frames, {}, { fileKey: frames[0]?.fileKey ?? "selection" })),
+          text: caveat + JSON.stringify(buildNodesResponse(frames, {}, { fileKey: frames[0]?.fileKey ?? "selection" })),
         }],
       };
     } catch (e) {
