@@ -24,18 +24,37 @@ the design faithfully in whatever stack the project uses.
    assets (icons, images, anything you will not hand-rebuild);
    `figma.get_metadata` for components and paint/text styles;
    `figma.search_nodes` to find nodes by text when hunting something.
-3. **Build.** Reproduce the structure from the flex intent, fill in the
-   styling from get_nodes, adapt to the project's stack and conventions.
+3. **Build.** Mirror the node tree, then style it — adapt to the project's
+   stack and conventions.
+
+## The translation is mechanical — do not improvise it
+
+Mirror the tree **1:1**: one element per Figma node, same nesting.
+Transparent spacer frames with asymmetric padding are **intentional
+structure** — they create the design's spacing rhythm (insets, stagger,
+centering). Never flatten them away and never re-derive their effect
+from pixel positions.
+
+| Figma (flex digest) | CSS |
+| --- | --- |
+| `layoutMode: VERTICAL/HORIZONTAL` | `display: flex` + `flex-direction: column/row` |
+| sizing `FIXED` | explicit `width`/`height` |
+| sizing `HUG` | content sizing (usually: don't set it) |
+| `FILL` (child) | `flex-grow: 1` (or `flex: 1`) along the parent's axis |
+| `layoutAlign: STRETCH` | `align-items: stretch` / `align-self: stretch` |
+| `itemGap` / padding | `gap` / `padding` — copy the values |
+
+Build in this order: **structure from the flex digest first, styling
+from `get_nodes` second.** Bounding-box pixels are only ever a final
+verification pass — never an input.
 
 ## Hard rules
 
 - **Never derive layout from bounding-box pixels.** Pixel dimensions are
   the path of least resistance — that is exactly why they are wrong: they
-  describe the *result*, not the *intent*. The design's auto-layout
-  (hug/fill/fixed, gap, padding, alignment) maps 1:1 to flexbox;
-  `prepare_build` / `figma.get_flex_layout` return that translation. Build
-  layout from it; use pixels only to verify what you built, never to
-  structure it.
+  describe the *result*, not the *intent*. Use the flex digest and the
+  translation table above; pixels only to verify what you built, never
+  to structure it.
 - **Never conclude a frame is "empty" from a depth-limited pull** — the
   outline from `prepare_build` shows the whole tree. If you use
   `get_nodes` with a `depth`, children below it are pruned and look
