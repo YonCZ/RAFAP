@@ -500,7 +500,10 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
       if (res.status === 404) {
         throw new BridgeError(502, `the process on port ${PORT} is not a RAFAP bridge (404 on /api/agent/run)`);
       }
-      throw new BridgeError(res.status, data?.error ?? "the port-owning bridge rejected the command");
+      // Round 16.1 — the owner's REST error shape is {status, err}; the
+      // legacy /api/* shape is {error}. Read both so delegated failures keep
+      // their real message instead of a generic "rejected the command".
+      throw new BridgeError(res.status, data?.err ?? data?.error ?? "the port-owning bridge rejected the command");
     }
     return data.result;
   }
@@ -755,6 +758,19 @@ app.post("/api/agent/commands/:id/result", (req, res) => {
     cmd.status = "error";
     cmd.error = String(req.body.error);
     log(`[bridge] command failed: ${cmd.type} — ${cmd.error}`);
+  } else if (req.body?.payload === undefined || req.body?.payload === null) {
+    // Round 16.1 — empty results are never legitimate (no command returns
+    // null). Observed live: a stale plugin window in a second Figma file ack'd
+    // frame commands with `{payload: undefined}` — JSON.stringify drops the
+    // key, so the body arrives empty and the command used to resolve as a
+    // bogus success with no result. Fail loudly instead, so stale-plugin
+    // windows surface as errors instead of silent empty data.
+    cmd.status = "error";
+    cmd.error =
+      "the plugin that answered returned an empty result — a stale Figma Agent plugin window " +
+      "is likely intercepting commands. Reload the plugin (Plugins → Figma Agent) in every open " +
+      "Figma window, then try again.";
+    log(`[bridge] command ${cmd.type} (${cmd.id}) ack'd with an empty result — stale plugin window?`);
   } else {
     cmd.status = "success";
     cmd.result = req.body?.payload;
@@ -1139,7 +1155,7 @@ export { app, server };
 // Optional MCP tools (stdio) — registered when spawned by an MCP client.
 // ---------------------------------------------------------------------------
 
-const mcpServer = new Server({ name: "figma-agent-bridge", version: "4.0.0" }, { capabilities: { tools: {} } });
+const mcpServer = new Server({ name: "figma-agent-bridge", version: "4.0.1" }, { capabilities: { tools: {} } });
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [

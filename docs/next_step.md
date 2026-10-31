@@ -1131,6 +1131,40 @@ then deleted everything that does not serve it.
 179 tests (describe suites deleted). The parity-era "definition of
 done" checklist below is retired with the mission it measured.
 
+### Round 16.1 — child-id resolution + the stale-plugin window (postscript)
+
+Agent field report on the Round-16 build (its #1): "get_nodes with
+specific child ids returns an empty array — only whole stored frames
+resolve." Two causes, both fixed:
+
+1. **Child ids now resolve from stored subtrees** —
+   `lib/stitch.ts findNodeDocument` DFS-es the stored frame documents
+   for any node id, so `get_nodes`/`get_outline`/`get_flex_layout`/
+   `prepare_build` serve a child subtree instantly from the store
+   (no plugin round-trip, works offline). Resolution order: stored
+   frame → stored child subtree → live plugin pull → actionable 404.
+2. **The deeper root cause of the report itself: a stale plugin window
+   was swallowing live pulls.** Two Figma files were open at once, each
+   with a Figma Agent plugin long-polling the same command queue
+   (commands go to whichever window's poll wins the race). The plugin
+   in the agent's own window was a stale, never-reloaded build whose
+   `frame` handler posted `command-result` with neither error nor
+   payload — `JSON.stringify({payload: undefined})` drops the key, the
+   bridge recorded a bogus **success with no result**, and live pulls
+   silently returned nothing. That is exactly the "empty array" the
+   agent saw. (`npm run plugin:reload` only reloads the frontmost
+   window's plugin — the second window kept its old build.)
+   - **Bridge 4.0.1 guard**: a command-result with neither error nor
+     payload is now rejected as an error ("stale Figma Agent plugin
+     window is likely intercepting commands — reload the plugin in
+     every open Figma window"). No command legitimately returns null.
+   - **Follower delegation fix**: delegated errors now read the
+     owner's REST shape (`{status, err}`) as well as `{error}`, so
+     real messages survive instead of the generic "the port-owning
+     bridge rejected the command".
+   - Operational rule that fell out of this: after `plugin:reload`,
+     reload the plugin in *every* open Figma window that runs it.
+
 ---
 
 ## Execution protocol (unchanged, binding)
