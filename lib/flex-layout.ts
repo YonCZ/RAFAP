@@ -40,6 +40,7 @@ interface WalkNode {
   name?: string;
   type?: string;
   children?: unknown;
+  rotation?: number;
   layoutMode?: string;
   itemSpacing?: number;
   paddingTop?: number;
@@ -104,6 +105,27 @@ function rounded(v: number | undefined): number {
   return Math.round(Number(v ?? 0));
 }
 
+/** Rotation degrees as stored by Figma (non-zero only), rounded to 1
+ *  decimal. Raw value — see rotateDecls for the CSS translation. */
+function rotationDeg(n: WalkNode): number | null {
+  return typeof n.rotation === "number" && n.rotation !== 0 ? Math.round(n.rotation * 10) / 10 : null;
+}
+
+/**
+ * CSS transform declarations for a rotated node ("" when unrotated).
+ * SIGN FLIP: Figma's rotation is positive COUNTER-clockwise (rotation =
+ * atan2(-m10, m00) of relativeTransform) while CSS rotate() is positive
+ * clockwise — Figma -90 renders as rotate(90deg). Verified against the
+ * Board Screen tiles: left column stored -90, renders 90° clockwise.
+ * The pivot also differs from CSS's default: Figma rotates about the
+ * node's TOP-LEFT corner, hence transform-origin.
+ */
+function rotateDecls(n: WalkNode): string {
+  const rot = rotationDeg(n);
+  if (rot === null) return "";
+  return `rotate(${-rot}deg); transform-origin: top left`;
+}
+
 /** The flexbox declaration line for an auto-layout container. */
 function containerCss(n: WalkNode): string {
   const decls: string[] = ["display: flex"];
@@ -136,13 +158,15 @@ function childAxisPhrase(n: WalkNode, axis: "horizontal" | "vertical", primaryAx
   return `${axis === "horizontal" ? "w" : "h"}:${px}px`;
 }
 
-/** Full child note: both axes + grow/align overrides. */
+/** Full child note: both axes + grow/align overrides + rotation. */
 function childNote(n: WalkNode, parentLayoutMode: string): string {
   const primaryAxis = parentLayoutMode === "VERTICAL" ? "vertical" : "horizontal";
   const parts = [childAxisPhrase(n, "horizontal", primaryAxis), childAxisPhrase(n, "vertical", primaryAxis)];
   if (typeof n.layoutGrow === "number" && n.layoutGrow > 0) parts.push(`flex-grow:${rounded(n.layoutGrow)}`);
   const selfAlign = ALIGN[String(n.layoutAlign ?? "")];
   if (selfAlign && n.layoutAlign !== "INHERIT") parts.push(`align-self:${selfAlign}`);
+  const rot = rotateDecls(n);
+  if (rot) parts.push(`transform:${rot}`);
   return parts.join(" · ");
 }
 
@@ -182,7 +206,10 @@ export function buildFlexLayout(frames: FlexLayoutFrame[], opts: FlexLayoutOptio
           return;
         }
         const dir = n.layoutMode === "VERTICAL" ? "column" : "row";
-        lines.push(`${indent}"${name}" (${id}) · flex ${dir}${sz}`);
+        const rot = rotateDecls(n);
+        lines.push(
+          `${indent}"${name}" (${id}) · flex ${dir}${sz}${rot ? ` · transform: ${rot}` : ""}`,
+        );
         lines.push(`${indent}  ${containerCss(n)}`);
         const kids = Array.isArray(n.children) ? (n.children as WalkNode[]) : [];
         const noted = kids.filter((k) => k && typeof k === "object" && String(k.type) !== "TEXT");
@@ -195,8 +222,18 @@ export function buildFlexLayout(frames: FlexLayoutFrame[], opts: FlexLayoutOptio
           }
         }
         if (Array.isArray(n.children)) walk(n.children, depth + 1);
-      } else if (Array.isArray(n.children)) {
-        walk(n.children, depth);
+      } else {
+        // Round 16.2 — a rotated node outside auto-layout still gets a
+        // line: its rotation is layout data the bounding box cannot show.
+        const rot = rotateDecls(n);
+        if (rot) {
+          if (++count > maxNodes) {
+            truncated = true;
+            return;
+          }
+          lines.push(`${indent}"${name}" (${id})${sz} · transform: ${rot}`);
+        }
+        if (Array.isArray(n.children)) walk(n.children, depth);
       }
     };
 

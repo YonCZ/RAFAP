@@ -103,3 +103,44 @@ describe("buildFlexLayout", () => {
     expect(out).toContain(`"LegacyCol" (1:3): w:fit-content · h:flex:1`);
   });
 });
+
+describe("rotation (Round 16.2)", () => {
+  it("translates an auto-layout container's rotation with the SIGN FLIPPED (Figma CCW vs CSS CW), zero stays implicit", () => {
+    // Figma rotation: 90 = 90° counter-clockwise on screen → CSS rotate(-90deg)
+    const out = buildFlexLayout([frame(auto({ rotation: 90 }))]);
+    expect(out).toContain(`"Card" (1:1) · flex column · 335x316 · transform: rotate(-90deg); transform-origin: top left`);
+    const flat = buildFlexLayout([frame(auto({ rotation: 0 }))]);
+    expect(flat).not.toContain("rotate");
+  });
+
+  it("appends the transform to a child note inside an auto-layout parent", () => {
+    const doc = auto({
+      children: [
+        { id: "1:2", name: "Tile", type: "FRAME", rotation: -90, absoluteBoundingBox: { width: 100, height: 100 } },
+      ],
+    });
+    const out = buildFlexLayout([frame(doc)]);
+    expect(out).toContain(`"Tile" (1:2): w:100px · h:100px · transform:rotate(90deg); transform-origin: top left`);
+  });
+
+  it("emits a line for a rotated node outside auto-layout", () => {
+    const doc = {
+      id: "1:9",
+      name: "Board",
+      type: "FRAME",
+      absoluteBoundingBox: { width: 800, height: 800 },
+      children: [
+        { id: "1:10", name: "Left Tile", type: "FRAME", rotation: -90, absoluteBoundingBox: { width: 120, height: 120 }, children: [] },
+        { id: "1:11", name: "Flat Tile", type: "FRAME", rotation: 0, absoluteBoundingBox: { width: 120, height: 120 }, children: [] },
+      ],
+    };
+    const out = buildFlexLayout([frame(doc, "1:9", "Board")]);
+    expect(out).toContain(`"Left Tile" (1:10) · 120x120 · transform: rotate(90deg); transform-origin: top left`);
+    expect(out).not.toContain('"Flat Tile"');
+  });
+
+  it("rounds rotation to one decimal before flipping the sign", () => {
+    const out = buildFlexLayout([frame(auto({ rotation: 22.549999 }))]);
+    expect(out).toContain("rotate(-22.5deg)");
+  });
+});

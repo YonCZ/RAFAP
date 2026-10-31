@@ -1167,6 +1167,54 @@ resolve." Two causes, both fixed:
 
 ---
 
+### Round 16.2 — rotation restored, selection fan-out, the scaling recipe
+
+The user's end-to-end test of the Round-16 skill flow succeeded
+("misses like just couple of small details"), but the transcript
+post-mortem found three gaps, all fixed here:
+
+1. **Rotation restored (plugin 4.0.1).** Round 16 dropped transforms
+   with the parity extras, which cost the test agent 15+ minutes
+   inferring the Board Screen tiles' rotations from pixels. The plugin
+   now emits `rotation` (degrees, non-zero only) on every scene node —
+   a deliberate REST addition. The digests surface it: outline `rot 90`
+   token, flex digest `transform: rotate(90deg)` (containers, child
+   notes, and standalone lines for rotated nodes outside auto-layout).
+   The tricky part was the SIGN: Figma's `rotation` is positive
+   counter-clockwise (it equals `atan2(-m10, m00)` of the transform
+   matrix — confirmed by the Figma docs and the Grida figma→css
+   conversion guide) while CSS `rotate()` is positive clockwise, and
+   Figma rotates about the top-left corner where CSS defaults to
+   center. The flex digest therefore emits
+   `transform: rotate(-Xdeg); transform-origin: top left` — verified
+   live against the Board Screen tiles: the left-column tiles store
+   rotation −90 and render 90° clockwise, exactly matching the test
+   agent's visual read.
+2. **Multi-window selection fan-out (bridge 4.0.2).** The 16.1 root
+   cause had a residue: with two windows holding selections, a single
+   `selection` command still answers whichever poll wins — the agent
+   gets the wrong window ~50% of the time. Now `/pending` counts held
+   long-polls (one per open plugin window); when >1, `prepare_build` /
+   `get_selection` fire a burst of `max(4, 2N+2)` selection commands
+   and merge answers, deduped by fileKey + frame id
+   (`lib/selection-merge.ts`). Single window → behavior unchanged
+   (exactly one command). Selections spanning **multiple files**
+   return labeled options (`"Name" (id) — fileKey`) and the skill
+   tells the agent to ask the user which to build — never guess.
+   Followers delegate the whole fan-out to the port owner
+   (`POST /api/agent/selections`) since only it knows the poller
+   count. Known limitation kept: the rename button still races
+   between windows (human-triggered, one window at a time in
+   practice).
+3. **Skill additions.** Responsive scaling recipe (fit container +
+   `calc(100cqw * px / W)` for FIXED values against the design
+   resolution; FILL/HUG stay ordinary flex; only when the user asks),
+   the ask-which-frame rule for multi-file selections, and the
+   rotation row in the translation table.
+
+196 tests (13 new: outline/flex rotation tokens, selection merge,
+file count, options formatting). Bridge 4.0.2, plugin 4.0.1.
+
 ## Execution protocol (unchanged, binding)
 
 1. Port 3001 / `Agent Plugin/` untouched. Dev on 3002.

@@ -3,8 +3,10 @@
  *
  * Output mirrors GET https://api.figma.com/v1/files/:file_key per
  * figma/rest-api-spec (see agent.md §7). Our extensions (SVG markup,
- * render bounds, rotation) live under `_figmaAgent` — a strict
- * superset of the REST API, never a subset.
+ * render bounds) live under `_figmaAgent` — a strict superset of the
+ * REST API, never a subset. One deliberate REST addition (Round 16.2):
+ * `rotation` (degrees, non-zero only) on every scene node — REST omits
+ * it, but agents rebuilding the design need it.
  *
  * Commands (all execute in the sandbox, results relay via ui.html):
  *   push buttons   → export-selection · export-page-index
@@ -32,7 +34,7 @@ import {
   type StyleSource,
 } from "./lib/rest-mapping";
 
-const PLUGIN_VERSION = "4.0.0";
+const PLUGIN_VERSION = "4.0.1";
 const MAX_NODES_PER_EXTRACTION = 20000;
 
 figma.showUI(__html__, { width: 220, height: 52 });
@@ -617,6 +619,12 @@ async function serializeNode(node: SceneNode, ctx: ExtractContext): Promise<Reco
   // (renderBounds, blend modes, interactions, prototyping, vector
   // geometry, export settings, …) are gone — see docs/mined-data.md.
   if (typeof n.opacity === "number" && n.opacity !== 1) out.opacity = n.opacity;
+  // Round 16.2 — rotation restored: REST files never emit it, but rotated
+  // tiles/labels are real design data the agent cannot infer from
+  // bounding boxes. Degrees, non-zero only. Figma's sign is positive
+  // COUNTER-clockwise (rotation = atan2(-m10, m00)) — the opposite of
+  // CSS rotate(); the bridge's flex digest applies the sign flip.
+  if (typeof n.rotation === "number" && n.rotation !== 0) out.rotation = n.rotation;
   // constraints — REST emits them on every scene node; the plugin omits
   // the property on GROUPs and auto-layout children. Defaults measured:
   // GROUP/regular → LEFT/TOP, auto-layout child → SCALE/SCALE.

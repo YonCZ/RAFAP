@@ -27,6 +27,7 @@ interface WalkNode {
   type?: string;
   children?: unknown;
   characters?: string;
+  rotation?: number;
   layoutMode?: string;
   itemSpacing?: number;
   paddingTop?: number;
@@ -47,6 +48,15 @@ interface WalkNode {
  *  characters would break the one-line-per-node format). */
 function oneLine(s: string): string {
   return s.replace(/\s+/g, " ").trim();
+}
+
+/** Rotation token: `rot 90` / `rot -22.5` — the RAW Figma value,
+ *  degrees, non-zero only. Figma's sign is positive COUNTER-clockwise
+ *  (opposite of CSS rotate()) — the flex digest carries the corrected
+ *  CSS transform; copy that one, not this token. */
+function rotToken(n: WalkNode): string {
+  if (typeof n.rotation !== "number" || n.rotation === 0) return "";
+  return `rot ${Math.round(n.rotation * 10) / 10}`;
 }
 
 function size(n: WalkNode): string {
@@ -138,10 +148,15 @@ export function buildOutline(frames: OutlinableFrame[], opts: OutlineOptions = {
       if (type === "TEXT" && typeof n.characters === "string") {
         let chars = oneLine(n.characters);
         if (chars.length > maxText) chars = `${chars.slice(0, maxText - 1)}…`;
-        lines.push(`${indent}"${chars}" · ${id} · TEXT${sz ? ` · ${sz}` : ""}${hidden}`);
+        const rot = rotToken(n);
+        lines.push(
+          `${indent}"${chars}" · ${id} · TEXT${sz ? ` · ${sz}` : ""}${rot ? ` · ${rot}` : ""}${hidden}`,
+        );
       } else {
         const parts = [`"${typeof n.name === "string" ? oneLine(n.name) : ""}"`, id, type];
         if (sz) parts.push(sz);
+        const rot = rotToken(n);
+        if (rot) parts.push(rot);
         const kids = Array.isArray(n.children) ? n.children.length : 0;
         if (kids) parts.push(`${kids} ch`);
         const layout = layoutSummary(n);

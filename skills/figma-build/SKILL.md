@@ -43,10 +43,43 @@ from pixel positions.
 | `FILL` (child) | `flex-grow: 1` (or `flex: 1`) along the parent's axis |
 | `layoutAlign: STRETCH` | `align-items: stretch` / `align-self: stretch` |
 | `itemGap` / padding | `gap` / `padding` — copy the values |
+| rotation (flex digest `transform: rotate(…)`, outline `rot X`, data `rotation: X`) | copy the digest's line verbatim. **Do not write `rotate(Xdeg)` yourself**: Figma's sign is positive counter-clockwise, CSS's is clockwise — the digest already flips it and pins `transform-origin: top left` (Figma rotates about the top-left corner, CSS defaults to center) |
 
 Build in this order: **structure from the flex digest first, styling
 from `get_nodes` second.** Bounding-box pixels are only ever a final
 verification pass — never an input.
+
+## Responsive scaling (only when asked)
+
+Do not invent responsive behavior — build the design as drawn. If the
+user asks for the build to scale, use the design's own sizing modes,
+not invented breakpoints:
+
+1. Give the outer wrapper `container-type: inline-size` (container
+   queries). The design's pixel dimensions then translate against the
+   **design resolution** — the root frame's width `W` (e.g. 1200).
+2. `FIXED` sizes scale rigidly: a `120px` value in a `1200`-wide
+   design becomes `calc(100cqw * 120 / 1200)`. Do this for FIXED
+   widths, heights, gaps, paddings, radii, font sizes.
+3. `FILL` / `HUG` stay ordinary flex CSS (`flex-grow`, content
+   sizing) — those are the parts the design itself says should reflow.
+4. Everything else (colors, text, effects) is untouched by scaling.
+
+The ratio base is always the design's own resolution — never a
+viewport width, never a guessed breakpoint. If the design contains
+multiple artboards at different sizes, each artboard scales against
+its own `W`.
+
+## Multiple selections / multiple files
+
+When several Figma windows run the plugin at once, `prepare_build` /
+`get_selection` may return **labeled options instead of a build kit**
+(selections arrived from more than one file). Never pick one yourself:
+show the options (frame name + id + fileKey) to the user and ask which
+one to build, then re-run `prepare_build` with that frame's
+`frameIds` (and `fileKey`). Naming the frame in the request is also
+the reliable path in single-window use — `prepare_build
+{frameIds: ["76:657"]}` is race-free.
 
 ## Hard rules
 
@@ -65,8 +98,9 @@ verification pass — never an input.
 - **You cannot look at images yourself.** `figma.get_images` is for saving
   assets into the project, never for "looking" at the design — read the
   outline and text content instead.
-- Do not invent behavior that is not drawn (responsive scaling, animations,
-  states). If the data leaves a real ambiguity, ask the user — do not
+- Do not invent behavior that is not drawn (animations, states,
+  responsive scaling — scaling only when the user asks, via the recipe
+  above). If the data leaves a real ambiguity, ask the user — do not
   guess silently.
 - Extract intent from text nodes: button labels, headings, placeholder
   copy tell you what each region is *for*. Frame names + text content are

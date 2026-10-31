@@ -111,6 +111,19 @@ describe("buildOutline", () => {
     expect(line).toBe('"Abs" · 50:1 · FRAME');
   });
 
+  it("marks rotation as a rot token, non-zero only (Round 16.2)", () => {
+    const f = frame();
+    (f.document as any).children = [
+      { id: "70:1", name: "Tile", type: "FRAME", rotation: 90, children: [] },
+      { id: "70:2", name: "Label", type: "TEXT", characters: "GO", rotation: -22.5 },
+      { id: "70:3", name: "Flat", type: "FRAME", rotation: 0, children: [] },
+    ];
+    const lines = buildOutline([f]).split("\n");
+    expect(lines[1]).toBe('"Tile" · 70:1 · FRAME · rot 90');
+    expect(lines[2]).toBe('"GO" · 70:2 · TEXT · rot -22.5');
+    expect(lines[3]).toBe('"Flat" · 70:3 · FRAME'); // zero rotation stays implicit
+  });
+
   it("handles a document with no children and non-object documents", () => {
     const out = buildOutline([
       { id: "60:1", name: "Empty", document: { id: "60:1", name: "Empty", type: "FRAME", children: [] } },
