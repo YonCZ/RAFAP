@@ -4,8 +4,8 @@
   <style>
     /* Minimalistic two-line panel: connection status + what is being sent.
        Round 13 adds one inline "Rename Selected" button (one-click vision
-       rename of the selection's lazy-named nodes) on the connection row —
-       the panel keeps its 220x52 size. Everything else (buttons, title)
+       rename of the selection's lazy-named nodes) on the connection row.
+       The panel keeps its 220x52 size. Everything else (buttons, title)
        stays removed: the command queue makes manual sends unnecessary. */
     body { font-family: sans-serif; background: #1e1e1e; color: #fff; margin: 0; padding: 7px 9px; }
     div { font-size: 11px; line-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -18,8 +18,8 @@
     }
     #renameBtn:hover { background: #3d444d; }
     #renameBtn:disabled { opacity: 0.5; cursor: wait; }
-    #conn.on  { color: #7ee787; }   /* green — bridge connected */
-    #conn.off { color: #ff7b72; }   /* red — bridge offline */
+    #conn.on  { color: #7ee787; }   /* green: bridge connected */
+    #conn.off { color: #ff7b72; }   /* red: bridge offline */
     #conn { color: #bbb; }          /* connecting… */
     #status { color: #888; margin-top: 2px; }
     #status.ok { color: #7ee787; }
@@ -35,9 +35,9 @@
 
   <script>
     const BRIDGE = "http://localhost:3002";
-    // Round 16.3 — per-panel window id. Every long-poll carries it so the
+    // Round 16.3: per-panel window id. Every long-poll carries it so the
     // bridge can tell plugin windows apart and REMEMBER them between
-    // polls (a backgrounded Figma window's polls are throttled — without
+    // polls (a backgrounded Figma window's polls are throttled; without
     // identity+memory the bridge undercounts open windows and the
     // multi-window "which frame did you mean?" ask never fires).
     const WID = Math.random().toString(36).slice(2, 10);
@@ -54,7 +54,7 @@
 
     // --- agent command loop (long-poll) -----------------------------------
     // The bridge HOLDS each request up to ~10s until a command arrives, so
-    // delivery is near-instant. On fetch error we back off 1.5s and retry —
+    // delivery is near-instant. On fetch error we back off 1.5s and retry.
     // polling is self-healing across plugin reloads by design.
     const knownCommands = {}; // commandId -> type (for status display)
 
@@ -66,9 +66,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(msg.error ? { error: msg.error } : { payload: msg.payload }),
         });
-        status(msg.error ? "✗ " + label + ": " + msg.error : "✓ sent " + label, msg.error ? "err" : "ok");
+        status(msg.error ? "error: " + label + ": " + msg.error : "sent " + label, msg.error ? "err" : "ok");
       } catch {
-        status("✗ bridge unreachable while delivering " + label, "err");
+        status("error: bridge unreachable while delivering " + label, "err");
       }
     }
 
@@ -77,11 +77,11 @@
         try {
           const res = await fetch(BRIDGE + "/api/agent/commands/pending?wid=" + WID);
           const data = await res.json();
-          conn("● bridge online", "on");
+          conn("bridge online", "on");
           if (data.command) {
             knownCommands[data.command.id] =
               data.command.type + (data.command.params?.id ? " " + data.command.params.id : "");
-            status("→ " + knownCommands[data.command.id]);
+            status("running " + knownCommands[data.command.id]);
             parent.postMessage({
               pluginMessage: {
                 type: "agent-command",
@@ -91,9 +91,9 @@
               },
             }, "*");
           }
-          // no sleep needed on success — the long-poll itself paces the loop
+          // no sleep needed on success. The long-poll itself paces the loop.
         } catch {
-          conn("● bridge offline — retrying", "off");
+          conn("bridge offline, retrying", "off");
           await new Promise((r) => setTimeout(r, 1500));
         }
       }
@@ -105,7 +105,7 @@
     const renameBtn = document.getElementById("renameBtn");
     renameBtn.onclick = async () => {
       renameBtn.disabled = true;
-      status("renaming… (vision model, ~5s)", "");
+      status("renaming... vision model, about 5s", "");
       try {
         const res = await fetch(BRIDGE + "/api/rename/selected", {
           method: "POST",
@@ -114,15 +114,15 @@
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-          status("✗ " + (data.error || "rename failed"), "err");
+          status("error: " + (data.error || "rename failed"), "err");
         } else if ((data.applied || []).length === 0) {
           status(data.message || "nothing renamed", "");
         } else {
           const n = data.applied.length;
-          status("✓ renamed " + n + (n === 1 ? " node" : " nodes") + " — ⌘Z to undo", "ok");
+          status("renamed " + n + (n === 1 ? " node" : " nodes") + ". Press Cmd+Z to undo.", "ok");
         }
       } catch {
-        status("✗ bridge offline (port 3002)", "err");
+        status("bridge offline on port 3002", "err");
       } finally {
         renameBtn.disabled = false;
       }
@@ -148,12 +148,12 @@
           });
           if (res.ok) {
             const data = await res.json();
-            status("✓ stored " + data.saved.map(f => f.name).join(", "), "ok");
+            status("stored " + data.saved.map(f => f.name).join(", "), "ok");
           } else {
-            status("✗ server error response", "err");
+            status("error: server returned an error", "err");
           }
         } catch (err) {
-          status("✗ bridge offline (port 3002)", "err");
+          status("bridge offline on port 3002", "err");
         }
       }
 
@@ -165,9 +165,9 @@
             body: JSON.stringify(msg.payload),
           });
           const n = (msg.payload.pages || []).reduce((a, p) => a + (p.children || []).length, 0);
-          status(res.ok ? "✓ " + n + " frames indexed" : "✗ server error response", res.ok ? "ok" : "err");
+          status(res.ok ? "indexed " + n + " frames" : "error: server returned an error", res.ok ? "ok" : "err");
         } catch (err) {
-          status("✗ bridge offline (port 3002)", "err");
+          status("bridge offline on port 3002", "err");
         }
       }
     };

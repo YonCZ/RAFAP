@@ -1,40 +1,19 @@
-# Agent Plugin (Figma dev plugin)
+# Figma plugin
 
-Two files that make up the enhanced Figma plugin: `code.ts` + `ui.html`.
+The plugin reader and UI live in this folder. Figma runs `plugin/code.js`, built from `plugin/code.ts`. The panel is `plugin/ui.html`.
 
-## Install (one-time, per machine)
+## Install
 
-1. In the **Figma Desktop App**: Plugins → Development → **New Plugin…** →
-   Manifest + UI → name it `Agent Figma Exporter` → save it into a folder
-   of your choice (e.g. `Programming/Figma/Agent_Plugin` — it does NOT
-   need to live in the webapp repo).
-2. Copy `code.ts` and `ui.html` from this folder **over the generated
-   ones** in that folder (Figma compiles `code.ts` automatically).
-3. **Required**: edit the generated `manifest.json` in that folder and
-   add network access for the bridge — without this Figma blocks the
-   plugin's fetch to localhost:
+1. Run `npm install` and `npm run build:plugin` in the repo root.
+2. In the Figma desktop app, open Plugins, then Development, then Import plugin from manifest.
+3. Select `plugin/manifest.json` from this repo.
+4. Run the plugin from Plugins, then Development, then Figma Agent.
+5. Keep the panel open. It connects to the bridge and handles agent requests.
 
-   ```json
-   "networkAccess": {
-     "allowedDomains": ["http://localhost:3001"],
-     "reasoning": "Sends selected design trees to the local agent bridge during development."
-   }
-   ```
-
-   (Keep the `"id"` Figma generated; add `"networkAccess"` next to it.
-   Note: the field is called `reasoning` — Figma's schema rejects
-   `allowedDomainsReasoning`, and localhost requires the `reasoning`
-   field to be present.)
-4. Make sure `manifest.json` still has `"main": "code.js"` and
-   `"ui": "ui.html"` (the default).
+`manifest.json` already allows `http://localhost:3002`. If you copy the plugin to another folder, keep that network access entry.
 
 ## Run
 
-- The bridge server must be running: `cd webapp/figma-bridge && npm start`
-  (or `npx tsx bridge-server.ts`).
-- In Figma: open the plugin and **leave it open** — it connects to the
-  bridge (`🟢 connected`) and automatically executes the agent's
-  on-demand requests: page index, any frame by node id, or the current
-  selection. No clicking required.
-- The manual buttons (**Send Selected Frame(s)** / **Send Page Index**)
-  remain as a fallback.
+- Start the bridge from the repo root with `npm start`, or run `npx tsx bridge-server.ts`.
+- The panel shows the connection state and executes agent requests: page index, a frame by node ID, or the current selection.
+- The Send Selected Frame(s) and Send Page Index buttons remain as a fallback.

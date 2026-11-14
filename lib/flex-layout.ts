@@ -247,7 +247,7 @@ export function buildFlexLayout(frames: FlexLayoutFrame[], opts: FlexLayoutOptio
     }
 
     if (truncated) {
-      lines.push(`… flex digest truncated at ${maxNodes} nodes — pass frameIds to narrow`);
+      lines.push(`... flex digest truncated at ${maxNodes} nodes. Pass frameIds to narrow it.`);
     }
     lines.unshift(`== ${frame.id} "${oneLine(frame.name)}" · flex layout ==`);
     out.push(lines.join("\n"));

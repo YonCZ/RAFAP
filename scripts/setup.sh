@@ -31,7 +31,7 @@ ok "Types clean"
 
 say "Building the Figma plugin…"
 npm run build:plugin --silent
-ok "Plugin built → plugin/code.js"
+ok "Plugin built: plugin/code.js"
 
 cat <<EOF
 
@@ -41,12 +41,12 @@ $(printf '\033[1mNext steps\033[0m')
        npm start                     # http://127.0.0.1:3002
 
 2. In the Figma desktop app, import the plugin once:
-       Plugins → Development → Import plugin from manifest…
-       → $ROOT/plugin/manifest.json
+       Plugins, then Development, then Import plugin from manifest.
+       Select $ROOT/plugin/manifest.json.
 
 3. Open the plugin in your file:
-       Plugins → Development → Figma Agent
-   Keep its panel open — it is the bridge's connection to Figma.
+       Plugins, then Development, then Figma Agent.
+   Keep its panel open. It is the bridge's connection to Figma.
 
 4. Pull your file and check it:
        curl "http://127.0.0.1:3002/v1/files/local-<key>?fresh=1"
@@ -56,7 +56,7 @@ $(printf '\033[1mNext steps\033[0m')
        opencode mcp add figma --global -- \\
          $ROOT/node_modules/.bin/tsx $ROOT/bridge-server.ts
 
-Troubleshooting: see the README ("Troubleshooting") — the two classics are
-a backgrounded Figma window throttling the plugin, and a second bridge
-process (harmless: it follows the port owner).
+See Troubleshooting in the README. The two common cases are a backgrounded
+Figma window throttling the plugin, and a second bridge process, which is
+harmless because it follows the port owner.
 EOF

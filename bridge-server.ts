@@ -430,7 +430,7 @@ function sweepStale(): void {
   for (const c of commands.values()) {
     if ((c.status === "pending" || c.status === "delivered") && now - c.createdAt > COMMAND_TIMEOUT_MS) {
       c.status = "timeout";
-      c.error = "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible (a minimized or backgrounded window throttles the plugin)?";
+      c.error = "plugin did not respond in time. Is the Figma Agent panel open and the Figma window visible? A minimized or backgrounded window throttles the plugin.";
     }
   }
 }
@@ -503,7 +503,7 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
     } catch (e) {
       throw new BridgeError(
         502,
-        `the bridge owning port ${PORT} is unreachable (${(e as Error).message}) — is it still running?`,
+        `the bridge owning port ${PORT} is unreachable (${(e as Error).message}). Is it still running?`,
       );
     }
     const data: any = await res.json().catch(() => ({}));
@@ -519,7 +519,7 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
     return data.result;
   }
   if (!pluginConnected()) {
-    throw new BridgeError(503, "plugin not connected — open the Figma Agent plugin in Figma");
+    throw new BridgeError(503, "plugin not connected. Open the Figma Agent plugin in Figma.");
   }
   const cmd = createCommand(type, params);
   if (!cmd) throw new BridgeError(400, `invalid command: ${type}`);
@@ -533,8 +533,8 @@ async function runCommand(type: string, params: any, timeoutMs = 25_000): Promis
     if (Date.now() - start > timeoutMs) {
       c.status = "timeout";
       c.error =
-        "plugin did not respond in time — is the Figma Agent panel open and the Figma window visible " +
-        "(a minimized or backgrounded window throttles the plugin)?";
+        "plugin did not respond in time. Is the Figma Agent panel open and the Figma window visible? " +
+        "A minimized or backgrounded window throttles the plugin.";
       throw new BridgeError(504, `command timed out: ${c.error}`);
     }
     await sleep(150);
@@ -956,7 +956,7 @@ app.get("/api/frames", (_req, res) => {
 app.get("/api/frames/:id", (req, res) => {
   const frame = readFrame(req.params.id);
   if (frame === null) {
-    res.status(404).json({ error: "frame not received yet — send it from the plugin" });
+    res.status(404).json({ error: "frame not received yet. Send it from the plugin." });
     return;
   }
   res.json(frame);
@@ -1002,7 +1002,7 @@ app.get("/v1/files/:key", async (req, res) => {
     }
     const pages = getPages(key);
     if (!pages) {
-      restError(res, 404, `file ${key} not found — no pages stored. Open the Figma Agent plugin and pull (?fresh=1) first.`);
+      restError(res, 404, `file ${key} not found. No pages are stored. Open the Figma Agent plugin and pull with ?fresh=1 first.`);
       return;
     }
     const ids = typeof req.query.ids === "string" ? req.query.ids.split(",").map((s) => s.trim()) : undefined;
@@ -1056,8 +1056,8 @@ async function resolveFramesForIds(key: string, ids: string[]): Promise<StoredFr
     if (!frame) {
       throw new BridgeError(
         404,
-        `node ${id} not found in file ${key} — it is not stored and no stored frame contains it. ` +
-          `Select its frame in Figma and call prepare_build (or get the parent frame pulled), then try again.`,
+        `node ${id} not found in file ${key}. It is not stored and no stored frame contains it. ` +
+          `Select its frame in Figma and call prepare_build, or get the parent frame pulled, then try again.`,
       );
     }
     frames.push(frame);
@@ -1245,13 +1245,13 @@ function startHttpListener(): void {
     if (e.code === "EADDRINUSE") {
       httpPortOwned = false;
       log(
-        `[bridge] port ${PORT} is owned by another bridge — following it: REST/MCP serve ` +
+        `[bridge] port ${PORT} is owned by another bridge. Following it: REST/MCP serve ` +
           `from the shared store, live plugin commands are delegated to the owner. ` +
           `Retrying every 30s to take over if it exits.`,
       );
       setTimeout(startHttpListener, 30_000);
     } else {
-      log(`[bridge] HTTP server error: ${e.code ?? "unknown"} — ${e.message}`);
+      log(`[bridge] HTTP server error: ${e.code ?? "unknown"}: ${e.message}`);
     }
   });
   server = srv;
